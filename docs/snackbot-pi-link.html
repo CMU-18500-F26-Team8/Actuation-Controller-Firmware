@@ -1,0 +1,424 @@
+<title>SnackBot Pi Link</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* Layout: one reading column of reference sections; wide tables scroll in place.
+   Colour encodes direction: green = STM32 (solder mask), raspberry = Pi. */
+:root {
+  --bg: #f5f7f4;
+  --surface: #ffffff;
+  --fg: #18211d;
+  --muted: #56645d;
+  --line: #d9e0db;
+  --stm: #1d7356;
+  --stm-soft: #e1efe8;
+  --pi: #a8325a;
+  --pi-soft: #f6e3ea;
+  --code-bg: #eef2ef;
+  --warn: #8a5a00;
+  --warn-soft: #fbf0d9;
+  --font-display: "IBM Plex Sans Condensed", "Arial Narrow", system-ui, sans-serif;
+  --font-body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #111714; --surface: #18201c; --fg: #e3ebe6; --muted: #9aaba2; --line: #2b3832;
+    --stm: #5cc79d; --stm-soft: #1c3a2e; --pi: #ef7fa5; --pi-soft: #3d1f2b;
+    --code-bg: #1f2925; --warn: #f0c062; --warn-soft: #3a2f17; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #111714; --surface: #18201c; --fg: #e3ebe6; --muted: #9aaba2; --line: #2b3832;
+  --stm: #5cc79d; --stm-soft: #1c3a2e; --pi: #ef7fa5; --pi-soft: #3d1f2b;
+  --code-bg: #1f2925; --warn: #f0c062; --warn-soft: #3a2f17; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body {
+  background: var(--bg); color: var(--fg);
+  font-family: var(--font-body); font-size: 15px; line-height: 1.6;
+}
+.wrap {
+  max-width: 920px; margin: 0 auto;
+  padding-block: 40px 72px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  display: flex; flex-direction: column; gap: 48px;
+}
+header { display: flex; flex-direction: column; gap: 10px; }
+.eyebrow { font-family: var(--font-mono); font-size: 12px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+h1 { font-family: var(--font-display); font-weight: 600; font-size: clamp(30px, 6vw, 44px); line-height: 1.1; margin: 0; text-wrap: balance; }
+h2 { font-family: var(--font-display); font-weight: 600; font-size: 24px; line-height: 1.2; margin: 0; text-wrap: balance; }
+h3 { font-size: 15px; font-weight: 600; margin: 0; }
+p { margin: 0; max-width: 68ch; }
+.lede { font-size: 17px; color: var(--muted); max-width: 64ch; }
+section { display: flex; flex-direction: column; gap: 16px; }
+code, .mono { font-family: var(--font-mono); font-size: .9em; }
+:not(pre) > code { background: var(--code-bg); padding: 1px 5px; border-radius: 4px; }
+.facts { display: flex; flex-wrap: wrap; gap: 8px; }
+.fact { font-family: var(--font-mono); font-size: 13px; padding: 4px 10px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface); }
+
+.scroll { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+table { border-collapse: collapse; width: 100%; font-size: 14px; }
+th, td { text-align: left; vertical-align: top; padding: 9px 12px; border-bottom: 1px solid var(--line); }
+tr:last-child td { border-bottom: 0; }
+th { font-size: 12px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); background: var(--code-bg); white-space: nowrap; }
+td code { white-space: nowrap; }
+td.num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+.dir { display: inline-flex; align-items: center; gap: 6px; font-family: var(--font-mono); font-size: 12px; font-weight: 500; padding: 2px 8px; border-radius: 4px; white-space: nowrap; }
+.dir.to-stm { background: var(--stm-soft); color: var(--stm); }
+.dir.to-pi { background: var(--pi-soft); color: var(--pi); }
+
+.frame { font-family: var(--font-mono); font-size: clamp(13px, 2.6vw, 17px); display: flex; flex-wrap: wrap; align-items: stretch; gap: 0; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: var(--surface); }
+.frame span { padding: 10px 12px; display: flex; flex-direction: column; gap: 2px; border-right: 1px solid var(--line); }
+.frame span:last-child { border-right: 0; }
+.frame small { font-family: var(--font-body); font-size: 11px; color: var(--muted); letter-spacing: .03em; }
+.frame .nl { color: var(--stm); font-weight: 500; }
+
+.diagram { border: 1px solid var(--line); border-radius: 8px; background: var(--surface); overflow-x: auto; padding: 8px; }
+.diagram svg { display: block; min-width: 560px; width: 100%; height: auto; }
+
+pre { margin: 0; background: var(--code-bg); border-radius: 8px; padding: 14px 16px; overflow-x: auto; font-family: var(--font-mono); font-size: 13px; line-height: 1.55; }
+.codebox { position: relative; }
+.copy { position: absolute; top: 8px; right: 8px; font: 500 12px var(--font-body); padding: 4px 10px; border-radius: 6px; border: 1px solid var(--line); background: var(--surface); color: var(--fg); cursor: pointer; }
+.copy:hover { border-color: var(--stm); }
+.copy:focus-visible, a:focus-visible { outline: 2px solid var(--stm); outline-offset: 2px; }
+
+.log { font-family: var(--font-mono); font-size: 13px; display: grid; grid-template-columns: auto auto 1fr; gap: 4px 12px; align-items: baseline; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; overflow-x: auto; }
+.log .t { color: var(--muted); font-variant-numeric: tabular-nums; }
+.log .msg { white-space: nowrap; }
+.log .note { grid-column: 1 / -1; font-family: var(--font-body); font-size: 13px; color: var(--muted); padding: 2px 0 6px; }
+
+.rules { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; }
+.rule { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.rule p { font-size: 14px; color: var(--muted); }
+
+.led { display: inline-flex; align-items: center; gap: 8px; }
+.dot { width: 12px; height: 12px; border-radius: 50%; border: 1px solid var(--line); background: transparent; flex: none; }
+.dot.on { background: #34c759; border-color: #2a9e48; box-shadow: 0 0 6px #34c75988; }
+.dot.blink { background: #34c759; border-color: #2a9e48; animation: blink 1s steps(1) infinite; }
+@keyframes blink { 50% { background: transparent; box-shadow: none; } }
+@media (prefers-reduced-motion: reduce) { .dot.blink { animation: none; background: linear-gradient(90deg, #34c759 50%, transparent 50%); } }
+
+ol.steps { margin: 0; padding-left: 22px; display: flex; flex-direction: column; gap: 10px; max-width: 70ch; }
+ol.steps li::marker { font-family: var(--font-mono); color: var(--stm); }
+.callout { background: var(--warn-soft); border-radius: 8px; padding: 12px 16px; font-size: 14px; color: var(--fg); }
+.callout strong { color: var(--warn); }
+footer { font-size: 13px; color: var(--muted); border-top: 1px solid var(--line); padding-top: 16px; }
+</style>
+
+<div class="wrap">
+  <header>
+    <div class="eyebrow">SnackBot · motor controller ↔ navigation</div>
+    <h1>SnackBot Pi Link</h1>
+    <p class="lede">How the navigation Raspberry Pi drives the robot through the Nucleo-F446RE motor controller: the three wires, every message in both directions, how the controller behaves, and where to tune it.</p>
+    <div class="facts">
+      <span class="fact">UART4 · 9600 8N1</span>
+      <span class="fact">every line ends in \n</span>
+      <span class="fact">0.16 m/s target</span>
+      <span class="fact">+deg = counter-clockwise</span>
+      <span class="fact">firmware ROBOT_MODE 0</span>
+    </div>
+  </header>
+
+  <section id="wiring">
+    <h2>Wiring</h2>
+    <p>The Nucleo runs from a 5 V, 1 A regulator fed by the robot battery instead of the laptop's USB. The Pi link is three wires: both boards use 3.3 V logic, so no level shifter, and TX crosses to RX. Every ground is common, and the Pi's 5 V is never connected to the Nucleo.</p>
+    <div class="diagram" role="img" aria-label="Battery 12 V feeds the motor driver and a 5 V regulator. Regulator 5 V goes to Nucleo E5V, CN7 pin 6, with jumper JP5 set to E5V; regulator ground to Nucleo GND, CN7 pin 8. Raspberry Pi pin 8 TXD to Nucleo A1, Pi pin 10 RXD to Nucleo A0, Pi pin 6 GND to Nucleo GND.">
+      <svg viewBox="0 0 860 420" xmlns="http://www.w3.org/2000/svg">
+        <!-- battery -->
+        <rect x="16" y="24" width="200" height="86" rx="10" fill="var(--warn-soft)" stroke="var(--warn)" stroke-width="1.5"/>
+        <text x="116" y="54" text-anchor="middle" font-family="IBM Plex Sans Condensed, sans-serif" font-size="17" font-weight="600" fill="var(--warn)">Robot battery</text>
+        <text x="116" y="74" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11" fill="var(--muted)">12 V</text>
+        <text x="66" y="100" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="12" font-weight="500" fill="var(--fg)">+</text>
+        <text x="166" y="100" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="12" font-weight="500" fill="var(--fg)">−</text>
+        <!-- regulator -->
+        <rect x="16" y="214" width="200" height="110" rx="10" fill="var(--surface)" stroke="var(--fg)" stroke-width="1.5"/>
+        <text x="116" y="244" text-anchor="middle" font-family="IBM Plex Sans Condensed, sans-serif" font-size="17" font-weight="600" fill="var(--fg)">5 V regulator</text>
+        <text x="116" y="262" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11" fill="var(--muted)">5 V · 1 A</text>
+        <g font-family="IBM Plex Mono, monospace" font-size="11" fill="var(--fg)">
+          <text x="30" y="232">IN</text><text x="160" y="232">GND</text>
+          <text x="204" y="285" text-anchor="end">5V OUT</text>
+          <text x="204" y="315" text-anchor="end">GND</text>
+        </g>
+        <!-- battery to regulator, and to the driver -->
+        <g stroke-width="2.5" fill="none">
+          <path d="M66 110 V214" stroke="var(--warn)"/>
+          <path d="M166 110 V214" stroke="var(--muted)"/>
+          <path d="M66 150 H300" stroke="var(--warn)" stroke-dasharray="6 4"/>
+          <path d="M166 175 H300" stroke="var(--muted)" stroke-dasharray="6 4"/>
+        </g>
+        <g font-family="IBM Plex Sans, sans-serif" font-size="11" fill="var(--muted)">
+          <text x="306" y="154">→ motor driver VIN (12 V)</text>
+          <text x="306" y="179">→ motor driver GND</text>
+        </g>
+        <!-- regulator to Nucleo -->
+        <g stroke-width="2.5" fill="none">
+          <path d="M216 281 H404" stroke="var(--warn)"/>
+          <path d="M216 311 H404" stroke="var(--muted)"/>
+        </g>
+        <g font-family="IBM Plex Sans, sans-serif" font-size="11" fill="var(--muted)" text-anchor="middle">
+          <text x="310" y="274">5 V</text>
+          <text x="310" y="304">ground</text>
+        </g>
+        <!-- Nucleo -->
+        <rect x="404" y="214" width="226" height="190" rx="10" fill="var(--stm-soft)" stroke="var(--stm)" stroke-width="1.5"/>
+        <text x="517" y="378" text-anchor="middle" font-family="IBM Plex Sans Condensed, sans-serif" font-size="17" font-weight="600" fill="var(--stm)">Nucleo-F446RE</text>
+        <g font-family="IBM Plex Mono, monospace" font-size="11" fill="var(--fg)">
+          <text x="418" y="285">E5V · CN7 pin 6</text>
+          <text x="418" y="315">GND · CN7 pin 8</text>
+          <text x="616" y="245" text-anchor="end">A1 · PA1 · RX</text>
+          <text x="616" y="275" text-anchor="end">A0 · PA0 · TX</text>
+          <text x="616" y="305" text-anchor="end">GND</text>
+        </g>
+        <!-- JP5 jumper -->
+        <g>
+          <rect x="420" y="332" width="40" height="16" rx="3" fill="var(--surface)" stroke="var(--stm)"/>
+          <rect x="440" y="334" width="18" height="12" rx="2" fill="var(--stm)"/>
+          <text x="468" y="345" font-family="IBM Plex Mono, monospace" font-size="11" fill="var(--fg)">JP5 → E5V</text>
+        </g>
+        <!-- Pi -->
+        <rect x="716" y="214" width="128" height="120" rx="10" fill="var(--pi-soft)" stroke="var(--pi)" stroke-width="1.5"/>
+        <text x="780" y="322" text-anchor="middle" font-family="IBM Plex Sans Condensed, sans-serif" font-size="16" font-weight="600" fill="var(--pi)">Raspberry Pi</text>
+        <g font-family="IBM Plex Mono, monospace" font-size="11" fill="var(--fg)">
+          <text x="728" y="245">pin 8 TXD</text>
+          <text x="728" y="275">pin 10 RXD</text>
+          <text x="728" y="305">pin 6 GND</text>
+        </g>
+        <g stroke-width="2.5" fill="none">
+          <path d="M716 241 H630" stroke="var(--pi)"/>
+          <path d="M630 271 H716" stroke="var(--stm)"/>
+          <path d="M630 301 H716" stroke="var(--muted)"/>
+        </g>
+        <g font-family="IBM Plex Sans, sans-serif" font-size="10" fill="var(--muted)" text-anchor="middle">
+          <text x="673" y="234">cmds</text>
+          <text x="673" y="264">reports</text>
+        </g>
+        <g fill="var(--fg)">
+          <circle cx="66" cy="214" r="4"/><circle cx="166" cy="214" r="4"/>
+          <circle cx="66" cy="150" r="3.5"/><circle cx="166" cy="175" r="3.5"/>
+          <circle cx="216" cy="281" r="4"/><circle cx="216" cy="311" r="4"/>
+          <circle cx="404" cy="281" r="4"/><circle cx="404" cy="311" r="4"/>
+          <circle cx="630" cy="241" r="4"/><circle cx="630" cy="271" r="4"/><circle cx="630" cy="301" r="4"/>
+          <circle cx="716" cy="241" r="4"/><circle cx="716" cy="271" r="4"/><circle cx="716" cy="301" r="4"/>
+        </g>
+        <!-- USB note -->
+        <text x="517" y="200" text-anchor="middle" font-family="IBM Plex Sans, sans-serif" font-size="11" fill="var(--muted)">USB to laptop: only for flashing or the debug log</text>
+      </svg>
+    </div>
+
+    <h3>Powering the Nucleo from the regulator</h3>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>From</th><th>To</th><th>Notes</th></tr></thead>
+        <tbody>
+          <tr><td>Battery +12 V</td><td>Regulator IN</td><td>Same battery that feeds the motor driver's VIN.</td></tr>
+          <tr><td>Battery −</td><td>Regulator GND</td><td>Ties the regulator into the robot's common ground.</td></tr>
+          <tr><td>Regulator 5V OUT</td><td><code>E5V</code>, CN7 pin 6 (morpho, left column)</td><td>Not the <code>5V</code> pin and not <code>VIN</code>: E5V is the Nucleo's input for an external 5 V supply.</td></tr>
+          <tr><td>Regulator GND</td><td><code>GND</code>, CN7 pin 8</td><td>Any Nucleo GND pin works.</td></tr>
+          <tr><td>Jumper JP5 (PWR)</td><td>move from <code>U5V</code> to <code>E5V</code></td><td>Near the USB connector. In U5V the board only takes power from USB.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <ol class="steps">
+      <li>Before the first power-up, check the regulator's output with a multimeter: it should read 4.75–5.25 V with no load.</li>
+      <li>Power-up order: JP5 on E5V, battery and regulator on, check that the red LD3 power LED is lit, and only then plug in USB if you want to flash or read the log. Plugging USB in first can stop the ST-LINK from starting properly.</li>
+      <li>The board's 5 V rail now comes from the regulator, so the encoders and the driver's 3.3 V logic supply are powered from it too. Together they draw well under the 1 A the regulator is rated for.</li>
+      <li>To go back to USB power, move JP5 back to U5V.</li>
+    </ol>
+
+    <h3>Wheels and encoders</h3>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>Wheel</th><th>Driver channel</th><th>Encoder A (yellow)</th><th>Encoder B (white)</th><th>Firmware</th></tr></thead>
+        <tbody>
+          <tr><td>Left</td><td>M2</td><td><code>CN7 pin 17</code> (PA15)</td><td><code>D3</code> (PB3)</td><td>Encoder 2 on TIM2 · <code>ENC2_DIRECTION −1</code></td></tr>
+          <tr><td>Right</td><td>M1</td><td><code>D12</code> (PA6)</td><td><code>D11</code> (PA7)</td><td>Encoder 1 on TIM3 · <code>ENC1_DIRECTION +1</code></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <ol class="steps">
+      <li>Encoder 2 was moved off <code>D10</code> / <code>CN7 pin 21</code> because the D10 header pin stopped passing its A signal. <code>ENC2_ALT_PINS 1</code> in <code>motor_pins.h</code> selects the new pins; <code>0</code> goes back.</li>
+      <li>CN7 pin 17 is the outer row, 9th pin from the USB end. The pin above it (15) is the debugger's SWCLK and the one below (19) is GND, so count carefully.</li>
+      <li>Both encoders take 5 V (blue) and GND (green) from the board. Driving forward, both counters go up.</li>
+      <li>To check an encoder, type <code>telem,on</code> on the USB port and turn the wheel slowly by hand: that wheel's speed in the T lines (<code>vL</code> or <code>vR</code>) should follow it, positive going forward. A speed stuck near 0 means one channel isn't arriving.</li>
+    </ol>
+
+    <h3>Pi link</h3>
+    <p>On the Pi: enable the serial port and disable the Linux serial console (<code>raspi-config</code> → Interface Options → Serial Port), then open <code>/dev/serial0</code>.</p>
+  </section>
+
+  <section id="format">
+    <h2>Message format</h2>
+    <p>One message per line in both directions: five comma-separated fields, then a newline. Empty bodies stay as empty fields. Type codes and keywords are matched without regard to case, and spaces around a field are ignored.</p>
+    <div class="frame" aria-label="Message frame">
+      <span>motor-instruction<small>type code</small></span>
+      <span>,turn<small>body 1</small></span>
+      <span>,90<small>body 2</small></span>
+      <span>,<small>body 3</small></span>
+      <span>,<small>body 4</small></span>
+      <span class="nl">\n<small>end</small></span>
+    </div>
+    <p>Lines longer than 80 characters are dropped. Unknown types and bad values are ignored and logged on the controller's USB debug port.</p>
+  </section>
+
+  <section id="messages">
+    <h2>Messages</h2>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>Direction</th><th>Line</th><th>What the controller does</th></tr></thead>
+        <tbody>
+          <tr><td><span class="dir to-stm">Pi → STM32</span></td><td><code>motor-instruction,straight,,,</code></td><td>Both wheels forward at 0.16 m/s under PID control. The Pi resends it every 0.1 s; repeats keep the robot moving without resetting the controller.</td></tr>
+          <tr><td><span class="dir to-stm">Pi → STM32</span></td><td><code>motor-instruction,reverse,,,</code></td><td>Same, backwards.</td></tr>
+          <tr><td><span class="dir to-stm">Pi → STM32</span></td><td><code>motor-instruction,stop,,,</code></td><td>Brakes both wheels immediately. Also aborts a turn in progress.</td></tr>
+          <tr><td><span class="dir to-stm">Pi → STM32</span></td><td><code>motor-instruction,turn,&lt;deg&gt;,,</code></td><td>Spins in place by the angle, measured on the wheel encoders. Positive is counter-clockwise (left). Decimals and negatives are fine: <code>-45.5</code>.</td></tr>
+          <tr><td><span class="dir to-stm">Pi → STM32</span></td><td><code>odometer-reset,,,,</code></td><td>Sets the odometer back to 0 m. Works at any time, including mid-turn.</td></tr>
+          <tr><td><span class="dir to-stm">Pi → STM32</span></td><td><code>leds-on-off,true,,,</code></td><td>Human-alert LED on (<code>false</code> = off). Shown on LD2.</td></tr>
+          <tr><td><span class="dir to-stm">Pi → STM32</span></td><td><code>button-led-on-off,true,,,</code></td><td>Button LED on (<code>false</code> = off). Shown on LD2.</td></tr>
+          <tr><td><span class="dir to-pi">STM32 → Pi</span></td><td><code>turn-complete,&lt;deg&gt;,,,</code></td><td>Sent when a turn finishes, or when <code>stop</code> aborts one. Body 1 is the angle the encoders measured, one decimal, signed like the command.</td></tr>
+          <tr><td><span class="dir to-pi">STM32 → Pi</span></td><td><code>odometer,&lt;m&gt;,,,</code></td><td>Every 0.2 s while driving straight or in reverse, plus one final report 0.15 s after the robot stops, once the wheels have settled. Every 1 s while standing still or turning. Distance travelled in metres, three decimals, always increasing.</td></tr>
+          <tr><td><span class="dir to-pi">STM32 → Pi</span></td><td><code>button-press,,,,</code></td><td>B1 (the blue button) was pressed. At most one per second, however many presses happen in that window.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="rules">
+    <h2>Behaviour</h2>
+    <div class="rules">
+      <div class="rule"><h3>During a turn</h3><p>Every motor instruction except <code>stop</code> is ignored. The Pi should wait for <code>turn-complete</code> before sending the next one. <code>stop</code> brakes at once and still sends <code>turn-complete</code> with the angle reached.</p></div>
+      <div class="rule"><h3>Command watchdog</h3><p>If no motor instruction arrives for 500 ms while driving straight or in reverse, the controller stops on its own. A crashed Pi can't leave the robot driving.</p></div>
+      <div class="rule"><h3>Odometer</h3><p>Distance travelled by the centre of the robot, so forward and reverse both add to it and a spin in place adds almost nothing.</p></div>
+      <div class="rule"><h3>Startup</h3><p>The controller checks the motor driver, then waits braked. LEDs start off. Nothing moves until the first motor instruction.</p></div>
+    </div>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>Alert LEDs</th><th>Button LED</th><th>LD2 (green, on the Nucleo)</th></tr></thead>
+        <tbody>
+          <tr><td>off</td><td>off</td><td><span class="led"><span class="dot"></span>off</span></td></tr>
+          <tr><td>off</td><td>on</td><td><span class="led"><span class="dot blink"></span>blinks once a second</span></td></tr>
+          <tr><td>on</td><td>either</td><td><span class="led"><span class="dot on"></span>solid</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>The Nucleo has one LED that firmware can control, so both LED messages share LD2 until real LEDs are wired.</p>
+  </section>
+
+  <section id="exchange">
+    <h2>A typical exchange</h2>
+    <div class="log" aria-label="Example message timeline">
+      <span class="t">0.00 s</span><span class="dir to-stm">Pi → STM32</span><span class="msg">motor-instruction,straight,,,</span>
+      <span class="note">…repeated every 0.1 s while the Pi wants to go straight</span>
+      <span class="t">0.50 s</span><span class="dir to-pi">STM32 → Pi</span><span class="msg">odometer,0.052,,,</span>
+      <span class="t">1.00 s</span><span class="dir to-pi">STM32 → Pi</span><span class="msg">odometer,0.132,,,</span>
+      <span class="t">1.20 s</span><span class="dir to-stm">Pi → STM32</span><span class="msg">motor-instruction,turn,90,,</span>
+      <span class="note">the robot slows to a stop and spins left; odometer reports pause</span>
+      <span class="t">2.65 s</span><span class="dir to-pi">STM32 → Pi</span><span class="msg">turn-complete,90.3,,,</span>
+      <span class="t">2.70 s</span><span class="dir to-stm">Pi → STM32</span><span class="msg">motor-instruction,straight,,,</span>
+      <span class="t">3.10 s</span><span class="dir to-pi">STM32 → Pi</span><span class="msg">button-press,,,,</span>
+    </div>
+    <p>Times and values are illustrative.</p>
+  </section>
+
+  <section id="python">
+    <h2>Pi side in Python</h2>
+    <div class="codebox">
+      <button class="copy" type="button" data-target="py">Copy</button>
+<pre id="py">import serial
+
+link = serial.Serial("/dev/serial0", 9600, timeout=0.05)
+
+def send(*fields):
+    fields = (list(fields) + [""] * 5)[:5]
+    link.write((",".join(str(f) for f in fields) + "\n").encode())
+
+def read_messages():
+    while link.in_waiting:
+        line = link.readline().decode(errors="replace").strip()
+        if line:
+            yield line.split(",")
+
+send("motor-instruction", "straight")
+send("motor-instruction", "turn", 90)
+for msg in read_messages():
+    if msg[0] == "turn-complete":
+        print("turned", float(msg[1]), "deg")</pre>
+    </div>
+  </section>
+
+  <section id="tuning">
+    <h2>Tuning</h2>
+    <p>Every value lives in <code>Core/Inc/robot_config.h</code>. Change it, rebuild, flash. Each wheel has its own speed PID with its own gains: <code>duty = KP·err + KI·∫err + KD·d(err)/dt</code>, nothing else. <code>L</code> = left wheel (M2), <code>R</code> = right wheel (M1).</p>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>Setting</th><th>Default</th><th>Unit</th><th>Effect</th></tr></thead>
+        <tbody>
+          <tr><td><code>TARGET_SPEED_MPS</code></td><td class="num">0.16</td><td>m/s</td><td>Straight and reverse speed at each wheel.</td></tr>
+          <tr><td><code>TURN_SPEED_MPS</code></td><td class="num">0.16</td><td>m/s</td><td>Wheel speed while spinning. 0.16 m/s is about 76°/s.</td></tr>
+          <tr><td><code>PID_L_KP</code> · <code>PID_R_KP</code></td><td class="num">200</td><td>‰ per m/s</td><td>Reaction to the current speed error.</td></tr>
+          <tr><td><code>PID_L_KI</code> · <code>PID_R_KI</code></td><td class="num">1000</td><td>‰ per m</td><td>Builds up the steady duty the wheel needs (about 12 % at 0.16 m/s unloaded, more on the floor). Must be above 0 to reach the target.</td></tr>
+          <tr><td><code>PID_L_KD</code> · <code>PID_R_KD</code></td><td class="num">0</td><td>‰ per m/s²</td><td>Damping. Leave at 0 unless the speed overshoots.</td></tr>
+          <tr><td><code>ACCEL_MPS2</code></td><td class="num">0.4</td><td>m/s²</td><td>Setpoint ramp. Lower it if the wheels slip when starting.</td></tr>
+          <tr><td><code>DUTY_LIMIT</code></td><td class="num">600</td><td>‰</td><td>Output clamp per wheel, with anti-windup.</td></tr>
+          <tr><td><code>TRACK_WIDTH_M</code></td><td class="num">0.2413</td><td>m</td><td>9.5 in. Raise it if turns overshoot, lower it if they undershoot.</td></tr>
+          <tr><td><code>WHEEL_DIAMETER_M</code></td><td class="num">0.0889</td><td>m</td><td>3.5 in. Sets the odometer and speed scale.</td></tr>
+          <tr><td><code>TURN_SLOW_DEG</code> / <code>TURN_MIN_SPEED_MPS</code></td><td class="num">15 / 0.05</td><td>deg / m/s</td><td>Slow-down over the last part of a turn, for accuracy.</td></tr>
+          <tr><td><code>CMD_WATCHDOG_MS</code></td><td class="num">500</td><td>ms</td><td>Auto-stop timeout. 0 turns it off.</td></tr>
+          <tr><td><code>ODOM_PERIOD_MS</code> · <code>ODOM_IDLE_PERIOD_MS</code> · <code>ODOM_STOP_SETTLE_MS</code> · <code>BUTTON_HOLDOFF_MS</code></td><td class="num">200 · 1000 · 150 · 1000</td><td>ms</td><td>Odometer rate while driving, rate while stopped or turning (0 = none), delay before the final report after a stop (0 = none), button window.</td></tr>
+          <tr><td><code>CONTROL_PERIOD_MS</code> · <code>SPEED_WINDOW_TICKS</code></td><td class="num">20 · 5</td><td>ms · ticks</td><td>50 Hz loop; speed measured over the last 100 ms.</td></tr>
+          <tr><td><code>LEFT_MOTOR</code> / <code>RIGHT_MOTOR</code></td><td class="num">M2 / M1</td><td></td><td>Which driver channel is which wheel (checked on the robot).</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="facts" aria-label="Derived numbers">
+      <span class="fact">0.1455 mm per encoder count</span>
+      <span class="fact">0.16 m/s ≈ 34 rpm ≈ 1100 counts/s</span>
+      <span class="fact">14.5 counts per degree of turn</span>
+      <span class="fact">90° ≈ 190 mm of wheel travel</span>
+    </div>
+
+    <h3>Tuning order</h3>
+    <p>Use <code>tools/pid_tune.py</code> (<code>pip3 install pyserial matplotlib</code>, then <code>python3 tools/pid_tune.py</code>, with no other serial monitor open). It plots each wheel's setpoint, speed and duty at 50 Hz, sends gains live with <code>set,&lt;name&gt;,&lt;value&gt;</code>, runs timed Forward / Reverse tests and prints rise time, overshoot, steady error and the duty each wheel needed. Live values last until reset: <b>Print config</b> gives the lines for <code>robot_config.h</code>.</p>
+    <ol class="steps">
+      <li>Wheels in the air. Set <code>accel</code> 100 so each run is a true step. Tune one wheel at a time: untick <b>show L</b> or <b>show R</b> to hide the other; each wheel's boxes only change that wheel.</li>
+      <li><code>ki</code> 0, <code>kd</code> 0. Raise <code>kp</code> (500, 1000, 2000, 4000…) until the speed starts to ring or the duty gets jagged, then halve it. With P alone the wheel settles below target; that's expected.</li>
+      <li>Raise <code>ki</code> (start near 2×<code>kp</code>, then double) until the speed reaches the target within about half a second with no more than ~10 % overshoot. Too much <code>ki</code> shows as a slow wobble around the target.</li>
+      <li>Leave <code>kd</code> at 0 unless the overshoot won't go away; the 100 ms speed measurement is too coarse for much D.</li>
+      <li>Set <code>accel</code> back to 0.4, check Forward and Reverse, then repeat on the floor under the robot's weight and keep those gains. <b>Print config</b> gives the lines for <code>robot_config.h</code>.</li>
+      <li>Drive 2 m straight. Each wheel is now controlled on its own, so the robot curves if one wheel runs slightly faster or is slightly bigger. Small curves are left to navigation.</li>
+      <li>Command <code>turn,360</code> and mark the start heading. Scale <code>TRACK_WIDTH_M</code> by actual turn ÷ 360 if it over- or undershoots.</li>
+    </ol>
+  </section>
+
+  <section id="open">
+    <h2>Before the first drive</h2>
+    <div class="callout"><strong>Checked on the chassis:</strong> M2 is the left wheel and M1 the right, and both drive forward on <code>straight</code>. A positive <code>turn</code> should spin the robot counter-clockwise seen from above (left wheel back, right wheel forward); if it ever turns the wrong way, swap <code>LEFT_MOTOR</code> and <code>RIGHT_MOTOR</code>.</div>
+    <ul class="steps" style="margin:0;padding-left:22px;display:flex;flex-direction:column;gap:8px;max-width:70ch">
+      <li>PID gains are starting guesses, checked in simulation only. Expect to tune them.</li>
+      <li>Driver faults are logged on the USB debug port but don't stop the robot yet, and there's no fault message to the Pi.</li>
+      <li><code>ROBOT_MODE 1</code> in <code>robot_config.h</code> brings back the B1 bench demo.</li>
+    </ul>
+  </section>
+
+  <footer>Firmware: <code>pi_link.c</code> (UART and parsing), <code>drive.c</code> (PID, odometry, turns), <code>robot_app.c</code> (messages, button, LED), settings in <code>robot_config.h</code>. Branch <code>two-motor</code>.</footer>
+</div>
+
+<script>
+document.querySelectorAll(".copy").forEach(function (btn) {
+  btn.addEventListener("click", function () {
+    var el = document.getElementById(btn.getAttribute("data-target"));
+    var text = el ? el.textContent : "";
+    function done(label) { btn.textContent = label; setTimeout(function () { btn.textContent = "Copy"; }, 1500); }
+    function selectIt() {
+      var r = document.createRange(); r.selectNodeContents(el);
+      var s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+      done("Selected");
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function () { done("Copied"); }, selectIt);
+    } else { selectIt(); }
+  });
+});
+</script>

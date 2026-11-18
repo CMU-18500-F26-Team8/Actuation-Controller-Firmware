@@ -1,0 +1,5 @@
+build/
+mx.scratch
+.DS_Store
+__pycache__/
+.vscode/c_cpp_properties.json

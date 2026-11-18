@@ -1,0 +1,461 @@
+/**
+ * @file    robot_app.c
+ * @brief   Pi control mode: turns Pi messages into drive commands, reports
+ *          odometry / turn completion / button presses, drives LD2.
+ *
+ * Pi -> STM32 (every line ends in '\n'):
+ *   motor-instruction,straight|reverse|stop,,,
+ *   motor-instruction,turn,<deg>,,        (+ = counter-clockwise, in place)
+ *   odometer-reset,,,,
+ *   leds-on-off,true|false,,,
+ *   button-led-on-off,true|false,,,
+ * STM32 -> Pi:
+ *   turn-complete,<measured deg>,,,
+ *   odometer,<metres travelled>,,,       (every ODOM_PERIOD_MS while moving straight,
+ *                                        once ODOM_STOP_SETTLE_MS after stopping, and
+ *                                        every ODOM_IDLE_PERIOD_MS otherwise)
+ *   button-press,,,,                     (B1, once per BUTTON_HOLDOFF_MS)
+ *
+ * While a turn runs, every motor instruction except "stop" is ignored.
+ * "stop" aborts the turn and turn-complete reports the angle reached.
+ */
+#include "robot_app.h"
+#include "robot_config.h"
+#include "motor_demo.h"
+#include "motor.h"
+#include "encoder.h"
+#include "drive.h"
+#include "pi_link.h"
+#include "uart_log.h"
+#include "main.h"
+
+#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <strings.h>
+
+#define UI_TICK_MS   10U                   /* button, LED, SF watch */
+
+#if ROBOT_MODE != 1   /* everything below until robot_app_init is Pi mode only */
+
+static uint32_t s_last_ui;
+static uint32_t s_last_motor_cmd;
+static uint32_t s_last_odom;
+static bool     s_odom_final_pending;   /* final report due after a stop */
+static uint32_t s_odom_stopped_at;
+static uint32_t s_last_status;
+static uint32_t s_last_btn_sent;
+static bool     s_btn_ever_sent;
+static drive_state_t s_prev_state;
+static bool     s_led_alert;
+static bool     s_led_button;
+static bool     s_sf_prev[MOTOR_COUNT];
+
+static bool     s_telem;                /* USB "telem,on": one T line per control tick */
+static uint32_t s_telem_tick;
+
+static bool     s_btn_prev_raw;
+static uint8_t  s_btn_stable;
+static bool     s_btn_latched;
+
+/* ---- formatting (newlib-nano printf has no %f) ------------------------------ */
+
+/** Writes v with `dec` decimals (0..4) into buf, e.g. "-12.5". */
+static const char *fmt_fixed(char *buf, size_t n, float v, int dec, bool plus)
+{
+  static const long k_pow[] = { 1, 10, 100, 1000, 10000 };
+  long scaled = lrintf(v * (float)k_pow[dec]);
+  const char *sign = (scaled < 0) ? "-" : (plus ? "+" : "");
+  long a = labs(scaled);
+  if (dec == 0) snprintf(buf, n, "%s%ld", sign, a);
+  else          snprintf(buf, n, "%s%ld.%0*ld", sign, a / k_pow[dec], dec, a % k_pow[dec]);
+  return buf;
+}
+
+static void log_time(uint32_t now)
+{
+  uart_log("t=%5lu.%02lus ", (unsigned long)(now / 1000U), (unsigned long)((now % 1000U) / 10U));
+}
+
+/* ---- sending ------------------------------------------------------------------ */
+
+static void send(const char *type, const char *b1)
+{
+  bool ok = pi_link_send(type, b1, NULL, NULL, NULL);
+  if (DEBUG_ECHO_PI || !ok)
+  {
+    log_time(HAL_GetTick());
+    uart_log("[tx%s] %s,%s,,,\n", ok ? "" : " DROPPED, buffer full", type, b1 ? b1 : "");
+  }
+}
+
+/* ---- receiving ----------------------------------------------------------------- */
+
+static bool parse_bool(const char *s, bool *out)
+{
+  if (!strcasecmp(s, "true")  || !strcmp(s, "1")) { *out = true;  return true; }
+  if (!strcasecmp(s, "false") || !strcmp(s, "0")) { *out = false; return true; }
+  return false;
+}
+
+/* ---- live tuning (USB debug port only) ---------------------------------------
+ *   get                     print the live tunables as a G line:
+ *     G,<kp_l>,<ki_l>,<kd_l>,<kp_r>,<ki_r>,<kd_r>,<speed>,<turn>,<accel>
+ *   set,<name>,<value>      name = kp_l ki_l kd_l kp_r ki_r kd_r speed turn accel
+ *   telem,on|off            one T line per control tick (50 Hz):
+ *     T,<ms>,<state>,<spL>,<vL>,<dutyL>,<spR>,<vR>,<dutyR>
+ *     state 0 stopped 1 straight 2 reverse 3 turning; sp/v in mm/s; duty permille
+ * Changes last until reset: copy the final values into robot_config.h. */
+
+#define TUNING_NAMES "kp_l ki_l kd_l kp_r ki_r kd_r speed turn accel"
+
+static void print_tuning(void)
+{
+  const drive_tuning_t *t = &g_drive_tuning;
+  char v[9][16];
+  const float vals[9] = { t->kp[0], t->ki[0], t->kd[0], t->kp[1], t->ki[1], t->kd[1],
+                          t->target_mps, t->turn_mps, t->accel_mps2 };
+  static const int dec[9] = { 2, 2, 2, 2, 2, 2, 4, 4, 3 };
+  for (int i = 0; i < 9; i++) fmt_fixed(v[i], sizeof(v[i]), vals[i], dec[i], false);
+  uart_log("G,%s,%s,%s,%s,%s,%s,%s,%s,%s\n", v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8]);
+}
+
+/** Returns true if the message was a tuning command (handled here). */
+static bool handle_tuning(const pi_msg_t *m)
+{
+  const char *type = m->field[0];
+  if (!strcasecmp(type, "get")) { print_tuning(); return true; }
+  if (!strcasecmp(type, "telem"))
+  {
+    bool on;
+    if (parse_bool(m->field[1], &on) || !strcasecmp(m->field[1], "on") || !strcasecmp(m->field[1], "off"))
+    {
+      s_telem = !strcasecmp(m->field[1], "on") || (parse_bool(m->field[1], &on) && on);
+      s_telem_tick = drive_tick_count();
+      uart_log("[telem] %s\n", s_telem ? "on" : "off");
+    }
+    else uart_log("      ignored: telem,on or telem,off\n");
+    return true;
+  }
+  if (!strcasecmp(type, "set"))
+  {
+    static const struct { const char *name; float *v; float lo, hi; } k_vars[] = {
+      { "kp_l",  &g_drive_tuning.kp[0],      0.0f, 50000.0f },
+      { "ki_l",  &g_drive_tuning.ki[0],      0.0f, 500000.0f },
+      { "kd_l",  &g_drive_tuning.kd[0],      0.0f, 5000.0f },
+      { "kp_r",  &g_drive_tuning.kp[1],      0.0f, 50000.0f },
+      { "ki_r",  &g_drive_tuning.ki[1],      0.0f, 500000.0f },
+      { "kd_r",  &g_drive_tuning.kd[1],      0.0f, 5000.0f },
+      { "speed", &g_drive_tuning.target_mps, 0.0f, 0.6f },
+      { "turn",  &g_drive_tuning.turn_mps,   TURN_MIN_SPEED_MPS, 0.6f },
+      { "accel", &g_drive_tuning.accel_mps2, 0.01f, 100.0f },
+    };
+    char *end = NULL;
+    float v = strtof(m->field[2], &end);
+    bool num_ok = m->field[2][0] != '\0' && end && *end == '\0' && isfinite(v);
+    for (size_t i = 0; i < sizeof(k_vars) / sizeof(k_vars[0]); i++)
+    {
+      if (strcasecmp(m->field[1], k_vars[i].name)) continue;
+      if (!num_ok || v < k_vars[i].lo || v > k_vars[i].hi)
+      {
+        char lo[16], hi[16];
+        uart_log("      ignored: %s must be a number from %s to %s\n", k_vars[i].name,
+                 fmt_fixed(lo, sizeof(lo), k_vars[i].lo, 2, false), fmt_fixed(hi, sizeof(hi), k_vars[i].hi, 2, false));
+        return true;
+      }
+      *k_vars[i].v = v;
+      print_tuning();
+      return true;
+    }
+    uart_log("      ignored: unknown name \"%s\" (" TUNING_NAMES ")\n", m->field[1]);
+    return true;
+  }
+  return false;
+}
+
+static void handle(const pi_msg_t *m, uint32_t now)
+{
+  const char *type = m->field[0];
+  const char *b1   = m->field[1];
+
+  if (DEBUG_ECHO_PI || m->src == PI_SRC_DEBUG)
+  {
+    log_time(now);
+    uart_log("[rx %s] %s,%s,%s,%s,%s\n", (m->src == PI_SRC_PI) ? "pi " : "usb",
+             m->field[0], m->field[1], m->field[2], m->field[3], m->field[4]);
+  }
+
+  if (m->src == PI_SRC_DEBUG && handle_tuning(m)) return;
+
+  if (!strcasecmp(type, "motor-instruction"))
+  {
+    if (!strcasecmp(b1, "stop"))
+    {
+      s_last_motor_cmd = now;
+      if (drive_stop()) uart_log("      stop: turn aborted\n");
+      return;
+    }
+    if (drive_state() == DRIVE_TURNING)
+    {
+      uart_log("      ignored: turn in progress\n");
+      return;
+    }
+    if (!strcasecmp(b1, "straight"))      { s_last_motor_cmd = now; (void)drive_straight(); }
+    else if (!strcasecmp(b1, "reverse"))  { s_last_motor_cmd = now; (void)drive_reverse(); }
+    else if (!strcasecmp(b1, "turn"))
+    {
+      char *end = NULL;
+      float deg = strtof(m->field[2], &end);
+      if (m->field[2][0] == '\0' || end == NULL || *end != '\0' || !isfinite(deg))
+      {
+        uart_log("      ignored: bad turn angle \"%s\"\n", m->field[2]);
+        return;
+      }
+      s_last_motor_cmd = now;
+      (void)drive_turn(deg);
+    }
+    else uart_log("      ignored: unknown motor instruction \"%s\"\n", b1);
+    return;
+  }
+
+  if (!strcasecmp(type, "odometer-reset"))
+  {
+    drive_odometer_reset();
+    return;
+  }
+
+  if (!strcasecmp(type, "leds-on-off") || !strcasecmp(type, "button-led-on-off"))
+  {
+    bool on;
+    if (!parse_bool(b1, &on))
+    {
+      uart_log("      ignored: expected true/false, got \"%s\"\n", b1);
+      return;
+    }
+    if (type[0] == 'l' || type[0] == 'L') s_led_alert = on;
+    else                                  s_led_button = on;
+    return;
+  }
+
+  uart_log("      ignored: unknown message type \"%s\"\n", type);
+}
+
+/* ---- B1 (front button), LD2, SF watch ------------------------------------------- */
+
+/** Debounced press edge on B1 (active low, 3 stable 10 ms ticks). */
+static bool button_pressed_edge(void)
+{
+  bool raw = (HAL_GPIO_ReadPin(USER_BUTTON_GPIO_PORT, USER_BUTTON_PIN) == GPIO_PIN_RESET);
+  if (raw == s_btn_prev_raw) { if (s_btn_stable < 255U) s_btn_stable++; }
+  else                       { s_btn_stable = 0U; s_btn_prev_raw = raw; }
+  if (s_btn_stable == 3U)
+  {
+    if (raw && !s_btn_latched) { s_btn_latched = true; return true; }
+    if (!raw)                    s_btn_latched = false;
+  }
+  return false;
+}
+
+/** LD2 is the only user LED: alert = solid, button LED only = 1 Hz blink. */
+static void update_led(uint32_t now)
+{
+  bool on = s_led_alert || (s_led_button && ((now / 500U) % 2U) == 0U);
+  HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, on ? GPIO_PIN_SET : GPIO_PIN_RESET);
+}
+
+static void ui_tick(uint32_t now)
+{
+  if (button_pressed_edge())
+  {
+    if (!s_btn_ever_sent || (now - s_last_btn_sent) >= BUTTON_HOLDOFF_MS)
+    {
+      s_btn_ever_sent = true;
+      s_last_btn_sent = now;
+      send("button-press", NULL);
+    }
+  }
+  update_led(now);
+
+  /* Faults are not acted on yet; just log SF changes for diagnosis. */
+  for (uint8_t m = 0; m < MOTOR_COUNT; m++)
+  {
+    bool low = motor_sf_pin_low(m);
+    if (low != s_sf_prev[m])
+    {
+      s_sf_prev[m] = low;
+      log_time(now);
+      uart_log("[sf] M%uSF %s\n", (unsigned)(m + 1U), low ? "LOW (driver reports fault)" : "back HIGH");
+    }
+  }
+}
+
+static void status_line(uint32_t now)
+{
+  char a[12], b[12], c[12], o[12];
+  log_time(now);
+  uart_log("%-8s", drive_state_name(drive_state()));
+  for (uint8_t i = 0; i < 2; i++)
+  {
+    drive_wheel_info_t w;
+    drive_wheel_info(i, &w);
+    uart_log(" %s sp%s v%s d%s%%", i ? "| R" : "L",
+             fmt_fixed(a, sizeof(a), w.setpoint_mps, 3, true),
+             fmt_fixed(b, sizeof(b), w.speed_mps, 3, true),
+             fmt_fixed(c, sizeof(c), (float)w.duty / 10.0f, 1, true));
+  }
+  uart_log(" | odom %s m\n", fmt_fixed(o, sizeof(o), drive_odometer_m(), 3, false));
+}
+
+/* ---- boot check ------------------------------------------------------------------ */
+
+/** Same two-stage check as the demo's self-test, logged only (faults are not
+ *  acted on yet). Leaves the driver enabled and braking. */
+static void boot_selftest(void)
+{
+  motor_wake();                            /* EN HIGH, D2 LOW: SF must be LOW */
+  HAL_Delay(20);
+  bool a1 = motor_sf_pin_low(MOTOR_1), a2 = motor_sf_pin_low(MOTOR_2);
+  motor_enable(true);                      /* D2 HIGH, 0 %: SF must be HIGH */
+  HAL_Delay(20);
+  bool b1 = motor_sf_pin_low(MOTOR_1), b2 = motor_sf_pin_low(MOTOR_2);
+  bool ok = a1 && a2 && !b1 && !b2;
+  uart_log("[self-test] D2 LOW: M1SF=%s M2SF=%s (expect LOW)  D2 HIGH: M1SF=%s M2SF=%s (expect HIGH)  %s\n",
+           a1 ? "LOW" : "HIGH", a2 ? "LOW" : "HIGH", b1 ? "LOW" : "HIGH", b2 ? "LOW" : "HIGH",
+           ok ? "pass" : "FAIL (check driver wiring / battery)");
+  s_sf_prev[MOTOR_1] = b1;
+  s_sf_prev[MOTOR_2] = b2;
+}
+
+/* ---------------------------------------------------------------------------------- */
+
+#endif /* ROBOT_MODE != 1 */
+
+void robot_app_init(void)
+{
+#if ROBOT_MODE == 1
+  motor_demo_init();
+#else
+  uart_log_init();
+  motor_init();
+  encoder_init();
+  pi_link_init();
+
+  uart_log("\n\n=== SnackBot motor controller: Pi control mode ===\n");
+  uart_log("Pi link: UART4 %u baud, A0 = TX -> Pi RXD, A1 = RX <- Pi TXD, lines end in \\n\n",
+           (unsigned)PI_UART_BAUD);
+  uart_log("Commands can also be typed here (end with Enter). B1 = front button, LD2 = LEDs.\n");
+  uart_log("Tuning (here only): get | set,<name>,<value> | telem,on|off   names: " TUNING_NAMES "\n");
+  {
+    char s1[12], s2[12], s3[12], s4[12];
+    uart_log("Target %s m/s, turns %s m/s, wheel %s m, track %s m\n",
+             fmt_fixed(s1, sizeof(s1), TARGET_SPEED_MPS, 3, false),
+             fmt_fixed(s2, sizeof(s2), TURN_SPEED_MPS, 3, false),
+             fmt_fixed(s3, sizeof(s3), WHEEL_DIAMETER_M, 4, false),
+             fmt_fixed(s4, sizeof(s4), TRACK_WIDTH_M, 4, false));
+  }
+  boot_selftest();
+  drive_init();
+
+  uint32_t now = HAL_GetTick();
+  s_last_ui = s_last_motor_cmd = s_last_odom = s_last_status = now;
+  s_prev_state = DRIVE_STOPPED;
+  s_led_alert = s_led_button = false;
+  update_led(now);
+  uart_log("[ready] stopped, waiting for the Pi\n");
+#endif
+}
+
+void robot_app_poll(void)
+{
+#if ROBOT_MODE == 1
+  motor_demo_poll();
+#else
+  uint32_t now = HAL_GetTick();
+  pi_msg_t msg;
+
+  while (pi_link_get(&msg)) handle(&msg, now);
+
+  drive_poll(now);
+
+  float deg;
+  if (drive_take_turn_done(&deg))
+  {
+    char b[12];
+    send("turn-complete", fmt_fixed(b, sizeof(b), deg, 1, false));
+  }
+
+  drive_state_t st = drive_state();
+  bool moving = (st == DRIVE_STRAIGHT || st == DRIVE_REVERSE);
+
+  if (moving && CMD_WATCHDOG_MS > 0U && (now - s_last_motor_cmd) >= CMD_WATCHDOG_MS)
+  {
+    (void)drive_stop();
+    log_time(now);
+    uart_log("[watchdog] no motor instruction for %u ms: stopped\n", (unsigned)CMD_WATCHDOG_MS);
+    st = drive_state();
+    moving = false;
+  }
+
+  bool was_moving = (s_prev_state == DRIVE_STRAIGHT || s_prev_state == DRIVE_REVERSE);
+  if (moving)
+  {
+    s_odom_final_pending = false;          /* moving again: periodic reports resume */
+    if (!was_moving) s_last_odom = now;    /* first report one period after starting */
+    if ((now - s_last_odom) >= ODOM_PERIOD_MS)
+    {
+      char b[12];
+      s_last_odom = now;
+      send("odometer", fmt_fixed(b, sizeof(b), drive_odometer_m(), 3, false));
+    }
+  }
+  else if (was_moving && ODOM_STOP_SETTLE_MS > 0U)
+  {
+    s_odom_final_pending = true;           /* just stopped (or a turn began) */
+    s_odom_stopped_at = now;
+  }
+  if (s_odom_final_pending && (now - s_odom_stopped_at) >= ODOM_STOP_SETTLE_MS)
+  {
+    char b[12];
+    s_odom_final_pending = false;
+    s_last_odom = now;
+    send("odometer", fmt_fixed(b, sizeof(b), drive_odometer_m(), 3, false));
+  }
+  else if (!moving && !s_odom_final_pending && ODOM_IDLE_PERIOD_MS > 0U
+           && (now - s_last_odom) >= ODOM_IDLE_PERIOD_MS)
+  {
+    char b[12];                            /* stopped or turning: slow heartbeat */
+    s_last_odom = now;
+    send("odometer", fmt_fixed(b, sizeof(b), drive_odometer_m(), 3, false));
+  }
+
+  if (s_telem && drive_tick_count() != s_telem_tick)
+  {
+    s_telem_tick = drive_tick_count();
+    drive_wheel_info_t l, r;
+    drive_wheel_info(0, &l);
+    drive_wheel_info(1, &r);
+    uart_log("T,%lu,%u,%ld,%ld,%d,%ld,%ld,%d\n", (unsigned long)now, (unsigned)st,
+             lrintf(l.setpoint_mps * 1000.0f), lrintf(l.speed_mps * 1000.0f), (int)l.duty,
+             lrintf(r.setpoint_mps * 1000.0f), lrintf(r.speed_mps * 1000.0f), (int)r.duty);
+  }
+
+  if (!s_telem && DEBUG_STATUS_MS > 0U && st != DRIVE_STOPPED && (now - s_last_status) >= DEBUG_STATUS_MS)
+  {
+    s_last_status = now;
+    status_line(now);
+  }
+  if (st != s_prev_state)
+  {
+    log_time(now);
+    uart_log("[state] %s -> %s\n", drive_state_name(s_prev_state), drive_state_name(st));
+    s_prev_state = st;
+  }
+
+  if ((now - s_last_ui) >= UI_TICK_MS)
+  {
+    s_last_ui = now;
+    ui_tick(now);
+  }
+#endif
+}
