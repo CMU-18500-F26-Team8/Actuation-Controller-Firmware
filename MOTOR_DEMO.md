@@ -87,7 +87,7 @@ t=    8.00s  M1 +20.0% +65.6rpm    M2 +20.0% +65.9rpm  sf=ok
 
 | STM32 → Pi | When |
 |---|---|
-| `turn-complete,<deg>,,,` | turn finished (or aborted by stop); angle measured by the encoders |
+| `turn-complete,<deg>,,,` | turn finished (or aborted by stop); angle measured by the gyro, or by the encoders without one (see IMU below) |
 | `odometer,<m>,,,` | every 0.2 s while driving straight/reverse, one final report 0.15 s after stopping, and every 1 s while stopped or turning; distance travelled, always increasing |
 | `button-press,,,,` | B1 pressed; at most one per second |
 
@@ -99,7 +99,41 @@ Each wheel runs a plain PID, `duty = KP·err + KI·∫err + KD·d(err)/dt`, with
 
 **Sides:** M2 is the left wheel and M1 the right (`LEFT_MOTOR` / `RIGHT_MOTOR` in `robot_config.h`), so the tuner's `_l` gains act on M2 and `_r` on M1.
 
-**Tuning:** every gain, speed and geometry value is in `robot_config.h` (`PID_L_KP/KI/KD`, `PID_R_KP/KI/KD`, `TARGET_SPEED_MPS`, `TURN_SPEED_MPS`, `TRACK_WIDTH_M`, ...). Code: `pi_link.c` (UART), `drive.c` (PID, odometry, turns), `robot_app.c` (messages, button, LED).
+**Tuning:** every gain, speed and geometry value is in `robot_config.h` (`PID_L_KP/KI/KD`, `PID_R_KP/KI/KD`, `TARGET_SPEED_MPS`, `TURN_SPEED_MPS`, `TRACK_WIDTH_M`, ...). Code: `pi_link.c` (UART), `drive.c` (PID, odometry, turns), `imu.c` (gyro), `robot_app.c` (messages, button, LED).
+
+## IMU: gyro-measured turns
+
+A HiLetgo HW-123 (GY-521 board, MPU-6050) gives the yaw rate. In Pi mode, a turn ends when the **gyro** has turned the commanded angle, the robot brakes and settles for 150 ms (`TURN_SETTLE_MS`), and `turn-complete` reports the gyro's angle. Wheel slip in an in-place turn no longer goes into the heading. The Pi protocol is unchanged.
+
+**Wiring (4 wires):**
+
+| HW-123 | Nucleo |
+|---|---|
+| VCC | 3V3 (or 5V: the board has its own regulator) |
+| GND | GND |
+| SCL | **D15** (PB8, I2C1 SCL) |
+| SDA | **D14** (PB9, I2C1 SDA) |
+| AD0, INT, XDA, XCL | leave open (address 0x68) |
+
+Mount it flat, chip side up, on something rigid (foam tape against motor vibration), as close to the midpoint between the wheels as is easy. Position doesn't change the yaw rate, but flat does.
+
+**Fallbacks.** Without a working IMU, turns run on the encoders exactly as before:
+- **Not found at boot:** `[imu] no answer ...`, and the firmware re-probes it every 0.5 s.
+- **3 reads fail in a row:** the IMU is marked down, and a turn under way finishes on the encoders.
+- **The gyro turns the opposite way to the wheels** (a wrong `IMU_YAW_SIGN`): the encoders finish the turn.
+- **The wheels get far ahead of the gyro** (more than 1.5 × the angle + 30°; the robot is stuck or spinning its wheels): the turn stops and reports the angle the gyro saw (`TURN_SLIP_*`).
+
+**Bias.** The gyro reads slightly off zero at rest, and this offset drifts with temperature. The firmware learns it while the robot stands still: stopped and wheels at rest for 0.3 s, then 0.5 s windows (`IMU_STILL_AFTER_MS`, `IMU_BIAS_WINDOW`). A window in which the readings jump (someone bumped the robot) is thrown away. After power-up, keep the robot still for about 1 s before the first turn. Until a bias is learnt, turns use the encoders.
+
+**Bring-up** (USB debug port):
+
+1. Boot and look for `[imu] MPU-6050 at 0x68, WHO_AM_I 0x68`. A different WHO_AM_I (0x70, 0x72, 0x98) is a clone chip and usually works.
+2. About 1 s later you should see `[imu] gyro bias learnt: ... deg/s`. Then type `imu`: `present`, rate near 0.00, and errors not counting up.
+3. **Sign:** type `imu,watch,on` and rotate the robot counter-clockwise by hand (seen from above). The yaw must go **up**. If it goes down, set `IMU_YAW_SIGN (-1)`. Type `imu,watch,off` when done.
+4. **Scale:** line the robot up against a mark, type `imu,zero`, turn it slowly by hand 5 whole turns counter-clockwise back onto the mark, then type `imu`. Compute scale = 1800 / yaw. You can try it live with `imu,scale,<v>`, then copy it into `IMU_GYRO_SCALE`. Expect a value within a few percent of 1.000.
+5. **Drive test:** send `motor-instruction,turn,90,,` and read the `[turn]` line. It shows the target, the gyro's angle, the encoders' angle and which one was reported. The difference between gyro and encoders is the slip the encoders used to miss.
+
+USB-only IMU commands: `imu` (status), `imu,zero`, `imu,cal` (forget the bias and learn it again), `imu,scale,<v>`, `imu,watch,on|off`. `IMU_TURNS 0` keeps the IMU running (status, watch) but turns go back to the encoders. `IMU_ENABLED 0` removes all IMU code.
 
 ## LED / button
 
@@ -145,7 +179,8 @@ Reading the result: self-test 2/2 fails → wiring/VIN, motors not involved. Sel
 | `Core/Src/motor_demo.c` | Bench demo (`ROBOT_MODE 1`): self-test, straight/spin moves, telemetry |
 | `Core/Inc/robot_config.h` | Pi-mode tunables: speeds, PID gains, geometry, timing |
 | `Core/Src/pi_link.c` | UART4 link to the Pi (+ typed commands on USB), ring buffers |
-| `Core/Src/drive.c` | One speed PID per wheel (own gains), odometry, in-place turns |
+| `Core/Src/drive.c` | One speed PID per wheel (own gains), odometry, in-place turns (gyro-ended, encoder fallback) |
+| `Core/Src/imu.c` | MPU-6050 Z gyro on I2C1 (register-level): yaw, bias learnt at rest, re-probe on failure |
 | `Core/Src/robot_app.c` | Pi messages → drive, odometer/turn/button reports, LD2 |
 | `Core/Src/main.c` | `robot_app_init` / `robot_app_poll` in `USER CODE` blocks |
 

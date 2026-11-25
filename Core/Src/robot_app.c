@@ -10,7 +10,7 @@
  *   leds-on-off,true|false,,,
  *   button-led-on-off,true|false,,,
  * STM32 -> Pi:
- *   turn-complete,<measured deg>,,,
+ *   turn-complete,<measured deg>,,,      (gyro angle; encoders without an IMU)
  *   odometer,<metres travelled>,,,       (every ODOM_PERIOD_MS while moving straight,
  *                                        once ODOM_STOP_SETTLE_MS after stopping, and
  *                                        every ODOM_IDLE_PERIOD_MS otherwise)
@@ -25,6 +25,7 @@
 #include "motor.h"
 #include "encoder.h"
 #include "drive.h"
+#include "imu.h"
 #include "pi_link.h"
 #include "uart_log.h"
 #include "main.h"
@@ -54,6 +55,11 @@ static bool     s_sf_prev[MOTOR_COUNT];
 
 static bool     s_telem;                /* USB "telem,on": one T line per control tick */
 static uint32_t s_telem_tick;
+
+static uint32_t s_still_since;          /* when the robot was last seen moving */
+static bool     s_imu_watch;            /* USB "imu,watch,on": yaw every IMU_WATCH_MS */
+static uint32_t s_imu_watch_last;
+#define IMU_WATCH_MS 250U
 
 static bool     s_btn_prev_raw;
 static uint8_t  s_btn_stable;
@@ -121,11 +127,72 @@ static void print_tuning(void)
   uart_log("G,%s,%s,%s,%s,%s,%s,%s,%s,%s\n", v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8]);
 }
 
+/* ---- IMU (USB debug port only) ------------------------------------------------
+ *   imu                     status: present, bias, rate, yaw, scale, counts
+ *   imu,zero                yaw = 0 (then turn the robot by hand, read "imu")
+ *   imu,cal                 forget the bias; relearnt at the next still moment
+ *   imu,scale,<v>           live gyro scale (copy into IMU_GYRO_SCALE)
+ *   imu,watch,on|off        yaw and rate every 250 ms */
+
+static void print_imu(void)
+{
+  imu_status_t st;
+  imu_get_status(&st);
+  char r[16], y[16], b[16], k[16];
+  uart_log("[imu] %s%s WHO_AM_I 0x%02X  rate %s deg/s  yaw %s deg  bias %s deg/s  scale %s  "
+           "samples %lu errors %lu bias-updates %lu\n",
+           st.present ? "present" : "ABSENT", st.calibrated ? "" : " (bias not learnt yet)",
+           (unsigned)st.who_am_i,
+           fmt_fixed(r, sizeof(r), st.rate_dps, 2, true),
+           fmt_fixed(y, sizeof(y), (float)st.yaw_deg, 2, true),
+           fmt_fixed(b, sizeof(b), st.bias_dps, 3, true),
+           fmt_fixed(k, sizeof(k), g_imu_gyro_scale, 4, false),
+           (unsigned long)st.samples, (unsigned long)st.errors, (unsigned long)st.bias_updates);
+}
+
+static void handle_imu(const pi_msg_t *m)
+{
+  const char *sub = m->field[1];
+  if (sub[0] == '\0') { print_imu(); return; }
+  if (!strcasecmp(sub, "zero")) { imu_zero(); uart_log("[imu] yaw zeroed\n"); return; }
+  if (!strcasecmp(sub, "cal"))
+  {
+    imu_recalibrate();
+    uart_log("[imu] bias forgotten; relearnt after %u ms standing still\n", (unsigned)IMU_STILL_AFTER_MS);
+    return;
+  }
+  if (!strcasecmp(sub, "watch"))
+  {
+    bool on;
+    if (!strcasecmp(m->field[2], "on")) on = true;
+    else if (!strcasecmp(m->field[2], "off")) on = false;
+    else if (!parse_bool(m->field[2], &on)) { uart_log("      ignored: imu,watch,on or imu,watch,off\n"); return; }
+    s_imu_watch = on;
+    uart_log("[imu] watch %s\n", on ? "on" : "off");
+    return;
+  }
+  if (!strcasecmp(sub, "scale"))
+  {
+    char *end = NULL;
+    float v = strtof(m->field[2], &end);
+    if (m->field[2][0] == '\0' || !end || *end != '\0' || !isfinite(v) || v < 0.5f || v > 1.5f)
+    {
+      uart_log("      ignored: imu,scale needs a number from 0.5 to 1.5\n");
+      return;
+    }
+    g_imu_gyro_scale = v;
+    print_imu();
+    return;
+  }
+  uart_log("      ignored: imu | imu,zero | imu,cal | imu,scale,<v> | imu,watch,on|off\n");
+}
+
 /** Returns true if the message was a tuning command (handled here). */
 static bool handle_tuning(const pi_msg_t *m)
 {
   const char *type = m->field[0];
   if (!strcasecmp(type, "get")) { print_tuning(); return true; }
+  if (!strcasecmp(type, "imu")) { handle_imu(m); return true; }
   if (!strcasecmp(type, "telem"))
   {
     bool on;
@@ -304,7 +371,9 @@ static void status_line(uint32_t now)
              fmt_fixed(b, sizeof(b), w.speed_mps, 3, true),
              fmt_fixed(c, sizeof(c), (float)w.duty / 10.0f, 1, true));
   }
-  uart_log(" | odom %s m\n", fmt_fixed(o, sizeof(o), drive_odometer_m(), 3, false));
+  uart_log(" | odom %s m", fmt_fixed(o, sizeof(o), drive_odometer_m(), 3, false));
+  if (imu_ok()) uart_log(" | yaw %s", fmt_fixed(o, sizeof(o), (float)imu_yaw_deg(), 1, true));
+  uart_log("\n");
 }
 
 /* ---- boot check ------------------------------------------------------------------ */
@@ -346,6 +415,7 @@ void robot_app_init(void)
            (unsigned)PI_UART_BAUD);
   uart_log("Commands can also be typed here (end with Enter). B1 = front button, LD2 = LEDs.\n");
   uart_log("Tuning (here only): get | set,<name>,<value> | telem,on|off   names: " TUNING_NAMES "\n");
+  uart_log("IMU (here only): imu | imu,zero | imu,cal | imu,scale,<v> | imu,watch,on|off\n");
   {
     char s1[12], s2[12], s3[12], s4[12];
     uart_log("Target %s m/s, turns %s m/s, wheel %s m, track %s m\n",
@@ -355,10 +425,12 @@ void robot_app_init(void)
              fmt_fixed(s4, sizeof(s4), TRACK_WIDTH_M, 4, false));
   }
   boot_selftest();
+  imu_init();
   drive_init();
 
   uint32_t now = HAL_GetTick();
   s_last_ui = s_last_motor_cmd = s_last_odom = s_last_status = now;
+  s_still_since = now;
   s_prev_state = DRIVE_STOPPED;
   s_led_alert = s_led_button = false;
   update_led(now);
@@ -376,6 +448,17 @@ void robot_app_poll(void)
 
   while (pi_link_get(&msg)) handle(&msg, now);
 
+  /* Still = stopped and both wheels at rest for IMU_STILL_AFTER_MS: the gyro
+   * may learn its bias. */
+  {
+    drive_wheel_info_t l, r;
+    drive_wheel_info(0, &l);
+    drive_wheel_info(1, &r);
+    if (drive_state() != DRIVE_STOPPED || l.speed_mps != 0.0f || r.speed_mps != 0.0f)
+      s_still_since = now;
+  }
+  imu_poll((now - s_still_since) >= IMU_STILL_AFTER_MS);
+
   drive_poll(now);
 
   float deg;
@@ -383,6 +466,21 @@ void robot_app_poll(void)
   {
     char b[12];
     send("turn-complete", fmt_fixed(b, sizeof(b), deg, 1, false));
+
+    drive_turn_info_t ti;
+    char t[12], g[12], e[12];
+    drive_last_turn(&ti);
+    log_time(now);
+    uart_log("[turn] target %s  gyro %s  encoders %s  -> reported %s (%s%s%s), %lu ms\n",
+             fmt_fixed(t, sizeof(t), ti.target_deg, 1, true),
+             ti.used_gyro ? fmt_fixed(g, sizeof(g), ti.gyro_deg, 1, true) : "n/a",
+             fmt_fixed(e, sizeof(e), ti.enc_deg, 1, true), b,
+             ti.used_gyro ? "gyro" : "encoders",
+             ti.wrong_way ? ", GYRO TURNED THE WRONG WAY: check IMU_YAW_SIGN"
+                          : (ti.fell_back ? ", gyro lost mid-turn" : ""),
+             ti.slipped ? ", SLIP: wheels far ahead of the gyro, stopped early"
+                        : (ti.aborted ? ", aborted by stop" : ""),
+             (unsigned long)ti.duration_ms);
   }
 
   drive_state_t st = drive_state();
@@ -438,6 +536,19 @@ void robot_app_poll(void)
     uart_log("T,%lu,%u,%ld,%ld,%d,%ld,%ld,%d\n", (unsigned long)now, (unsigned)st,
              lrintf(l.setpoint_mps * 1000.0f), lrintf(l.speed_mps * 1000.0f), (int)l.duty,
              lrintf(r.setpoint_mps * 1000.0f), lrintf(r.speed_mps * 1000.0f), (int)r.duty);
+  }
+
+  if (s_imu_watch && (now - s_imu_watch_last) >= IMU_WATCH_MS)
+  {
+    imu_status_t is;
+    char y[16], r[16];
+    s_imu_watch_last = now;
+    imu_get_status(&is);
+    log_time(now);
+    uart_log("[imu] yaw %s deg  rate %s deg/s%s\n",
+             fmt_fixed(y, sizeof(y), (float)is.yaw_deg, 2, true),
+             fmt_fixed(r, sizeof(r), is.rate_dps, 2, true),
+             imu_ok() ? "" : (is.present ? "  (bias not learnt yet)" : "  (IMU absent)"));
   }
 
   if (!s_telem && DEBUG_STATUS_MS > 0U && st != DRIVE_STOPPED && (now - s_last_status) >= DEBUG_STATUS_MS)

@@ -7,12 +7,16 @@
  *      the robot odometer (|left + right| / 2, so spins add ~0)
  *   2. pick each wheel's signed target speed from the drive state
  *      (straight / reverse / turning with a slow-down near the end)
+ *      A turn ends when the gyro has turned the angle (imu.h), or, without a
+ *      trustworthy gyro, when the wheels have travelled its arc. A gyro turn
+ *      brakes, waits TURN_SETTLE_MS and reports the gyro's angle.
  *   3. ramp each setpoint by at most ACCEL_MPS2
  *   4. one PID per wheel (its own gains) -> motor duty
  */
 #include "drive.h"
 #include "robot_config.h"
 #include "encoder.h"
+#include "imu.h"
 #include "motor.h"
 #include "stm32f4xx_hal.h"
 
@@ -44,8 +48,18 @@ static drive_state_t s_state;
 static float         s_dir[2];             /* commanded direction per wheel: +1 / -1 */
 static float         s_turn_arc_m;         /* wheel travel needed for the turn */
 static float         s_turn_sign;          /* +1 = CCW */
+static float         s_turn_target_deg;    /* |commanded angle| */
+static bool          s_turn_gyro;          /* the gyro is ending this turn */
+static bool          s_turn_fell_back;     /* it started on the gyro but lost it */
+static bool          s_turn_slipped;
+static bool          s_turn_wrong_way;     /* gyro turned against the wheels */
+static bool          s_turn_settling;      /* braked, waiting TURN_SETTLE_MS */
+static uint32_t      s_turn_settle_start;
+static uint32_t      s_turn_start_ms;
+static double        s_turn_yaw0;          /* gyro yaw when the turn started */
 static bool          s_turn_done;
 static float         s_turn_done_deg;
+static drive_turn_info_t s_last_turn;
 static uint32_t      s_odom_halfcounts;    /* sum of |dL + dR| */
 static uint32_t      s_last_tick;
 static uint32_t      s_tick_count;
@@ -103,10 +117,49 @@ static void begin_command(drive_state_t st, float dir_l, float dir_r)
   }
 }
 
-static void finish_turn(void)
+/** Angle (deg, + = CCW) the gyro has turned since the turn started. */
+static float gyro_turn_deg(void)
 {
-  s_turn_done_deg = measured_turn_deg();
+  return (float)(imu_yaw_deg() - s_turn_yaw0);
+}
+
+static void finish_turn(bool aborted)
+{
+  if (s_turn_gyro && !imu_ok())            /* lost it while settling */
+  {
+    s_turn_gyro = false;
+    s_turn_fell_back = true;
+  }
+  float enc = measured_turn_deg();
+  float gyr = s_turn_gyro ? gyro_turn_deg() : 0.0f;
+  s_turn_done_deg = s_turn_gyro ? gyr : enc;
   s_turn_done = true;
+  s_turn_settling = false;
+
+  s_last_turn.target_deg   = s_turn_sign * s_turn_target_deg;
+  s_last_turn.reported_deg = s_turn_done_deg;
+  s_last_turn.gyro_deg     = gyr;
+  s_last_turn.enc_deg      = enc;
+  s_last_turn.used_gyro    = s_turn_gyro;
+  s_last_turn.fell_back    = s_turn_fell_back;
+  s_last_turn.slipped      = s_turn_slipped;
+  s_last_turn.wrong_way    = s_turn_wrong_way;
+  s_last_turn.aborted      = aborted;
+  s_last_turn.duration_ms  = HAL_GetTick() - s_turn_start_ms;
+}
+
+/** Brake and end the turn: gyro turns settle first, encoder turns end now. */
+static void end_turn(uint32_t now)
+{
+  brake_all();
+  if (s_turn_gyro && TURN_SETTLE_MS > 0U)
+  {
+    s_turn_settling = true;
+    s_turn_settle_start = now;
+    return;
+  }
+  finish_turn(false);
+  s_state = DRIVE_STOPPED;
 }
 
 static float clampf(float v, float lo, float hi)
@@ -162,6 +215,7 @@ void drive_init(void)
   s_dir[0] = s_dir[1] = 1.0f;
   s_state = DRIVE_STOPPED;
   s_turn_done = false;
+  s_turn_settling = false;
   s_odom_halfcounts = 0U;
   s_last_tick = HAL_GetTick();
   brake_all();
@@ -203,19 +257,45 @@ void drive_poll(uint32_t now)
   float mag;
   if (s_state == DRIVE_TURNING)
   {
-    float done = 0.5f * (progress(0) + progress(1));
-    float remaining = s_turn_arc_m - done;
-    if (remaining <= 0.0f)
+    if (s_turn_settling)                   /* braked; duties already 0 */
     {
-      finish_turn();
-      s_state = DRIVE_STOPPED;
-      brake_all();
+      if ((now - s_turn_settle_start) >= TURN_SETTLE_MS)
+      {
+        finish_turn(false);
+        s_state = DRIVE_STOPPED;
+      }
       return;
     }
-    float slow_arc = TURN_SLOW_DEG * DEG_TO_RAD * HALF_TRACK_M;
-    mag = (remaining >= slow_arc)
+    if (s_turn_gyro && !imu_ok())          /* gyro lost: encoders finish it */
+    {
+      s_turn_gyro = false;
+      s_turn_fell_back = true;
+    }
+
+    /* Degrees still to go, along the commanded direction. */
+    float enc_deg = (0.5f * (progress(0) + progress(1))) / HALF_TRACK_M / DEG_TO_RAD;
+    if (s_turn_gyro && enc_deg > TURN_WRONG_WAY_DEG
+        && s_turn_sign * gyro_turn_deg() < -0.5f * enc_deg)
+    {
+      s_turn_gyro = false;                 /* IMU_YAW_SIGN wrong: encoders finish it */
+      s_turn_fell_back = true;
+      s_turn_wrong_way = true;
+    }
+    float remaining = s_turn_target_deg - (s_turn_gyro ? s_turn_sign * gyro_turn_deg() : enc_deg);
+    if (remaining <= 0.0f)
+    {
+      end_turn(now);
+      return;
+    }
+    if (s_turn_gyro && enc_deg > TURN_SLIP_RATIO * s_turn_target_deg + TURN_SLIP_EXTRA_DEG)
+    {
+      s_turn_slipped = true;               /* wheels far ahead of the gyro */
+      end_turn(now);
+      return;
+    }
+    mag = (remaining >= TURN_SLOW_DEG)
             ? T.turn_mps
-            : TURN_MIN_SPEED_MPS + (T.turn_mps - TURN_MIN_SPEED_MPS) * (remaining / slow_arc);
+            : TURN_MIN_SPEED_MPS + (T.turn_mps - TURN_MIN_SPEED_MPS) * (remaining / TURN_SLOW_DEG);
   }
   else
   {
@@ -249,7 +329,7 @@ bool drive_reverse(void)
 bool drive_stop(void)
 {
   bool aborted = (s_state == DRIVE_TURNING);
-  if (aborted) finish_turn();
+  if (aborted) finish_turn(true);
   s_state = DRIVE_STOPPED;
   brake_all();
   return aborted;
@@ -258,13 +338,21 @@ bool drive_stop(void)
 bool drive_turn(float deg)
 {
   if (s_state == DRIVE_TURNING) return false;
-  s_turn_sign  = (deg >= 0.0f) ? 1.0f : -1.0f;
-  s_turn_arc_m = fabsf(deg) * DEG_TO_RAD * HALF_TRACK_M;
+  s_turn_sign       = (deg >= 0.0f) ? 1.0f : -1.0f;
+  s_turn_target_deg = fabsf(deg);
+  s_turn_arc_m      = s_turn_target_deg * DEG_TO_RAD * HALF_TRACK_M;
+  s_turn_gyro       = IMU_TURNS && imu_ok();
+  s_turn_yaw0       = imu_yaw_deg();
+  s_turn_fell_back  = false;
+  s_turn_slipped    = false;
+  s_turn_wrong_way  = false;
+  s_turn_settling   = false;
+  s_turn_start_ms   = HAL_GetTick();
   /* CCW (+): left wheel backwards, right wheel forwards. */
   begin_command(DRIVE_TURNING, -s_turn_sign, s_turn_sign);
   if (s_turn_arc_m < M_PER_COUNT)          /* nothing to do (e.g. 0 deg) */
   {
-    finish_turn();
+    finish_turn(false);
     s_state = DRIVE_STOPPED;
     brake_all();
   }
@@ -278,6 +366,8 @@ bool drive_take_turn_done(float *deg_out)
   if (deg_out) *deg_out = s_turn_done_deg;
   return true;
 }
+
+void drive_last_turn(drive_turn_info_t *out) { *out = s_last_turn; }
 
 drive_state_t drive_state(void) { return s_state; }
 

@@ -54,6 +54,39 @@
 /* ---- Turns (always in place; positive angle = counter-clockwise) ---------- */
 #define TURN_SLOW_DEG           15.0f   /* ramp the speed down over the last N deg */
 #define TURN_MIN_SPEED_MPS      0.05f   /* speed at the very end of a turn */
+/* With the gyro (IMU_TURNS 1) a turn ends when the gyro has turned the angle,
+ * and turn-complete reports the gyro's angle after the robot has settled.
+ * Without it (no IMU, or it fails) the encoders end and measure the turn. */
+#define TURN_SETTLE_MS          150U    /* gyro turns: after braking, wait this long
+                                         * (the robot coasts a little), then report */
+#define TURN_SLIP_RATIO         1.5f    /* gyro turns: if the wheels have turned more than */
+#define TURN_SLIP_EXTRA_DEG     30.0f   /* RATIO x angle + EXTRA (in encoder degrees) while
+                                         * the gyro is still short, the wheels are slipping
+                                         * or the gyro is mounted wrong: stop the turn and
+                                         * report the angle the gyro saw */
+#define TURN_WRONG_WAY_DEG      10.0f   /* gyro turns: past this many encoder degrees, a
+                                         * gyro turning the other way (by more than half
+                                         * as much) is ignored and the encoders finish:
+                                         * IMU_YAW_SIGN is wrong */
+
+/* ---- IMU: HW-123 / GY-521 (MPU-6050), Z gyro only ---------------------------
+ * I2C1: D15 (PB8) = SCL, D14 (PB9) = SDA; VCC 3V3 or 5V, AD0 open. See imu.h.
+ * Calibrate the scale on the USB debug port: "imu,zero", turn the robot by
+ * hand N whole turns counter-clockwise against a mark, "imu", then set
+ * IMU_GYRO_SCALE = old scale x (N x 360) / yaw shown. */
+#define IMU_ENABLED             1       /* 0 = no IMU code at all */
+#define IMU_TURNS               1       /* 1 = gyro ends and measures turns; 0 = encoders */
+#define IMU_I2C_ADDR            0x68    /* 0x69 if AD0 is tied high */
+#define IMU_I2C_HZ              400000U /* fast mode; 100000 for long wires */
+#define IMU_YAW_SIGN            (+1)    /* +1 = chip face up, -1 = upside down */
+#define IMU_GYRO_SCALE          1.0f    /* yaw multiplier from the calibration above */
+#define IMU_SAMPLE_US           5000U   /* read the gyro every 5 ms (200 Hz) */
+#define IMU_STALE_MS            50U     /* no good read for this long: not trusted */
+#define IMU_RETRY_MS            500U    /* re-probe a missing / failed IMU this often */
+#define IMU_STILL_AFTER_MS      300U    /* stopped this long, wheels at rest: learn bias */
+#define IMU_BIAS_WINDOW         100U    /* samples per bias estimate (0.5 s) */
+#define IMU_STILL_SPREAD_DPS    1.0f    /* a window whose readings spread more was bumped */
+#define IMU_BIAS_BLEND          0.3f    /* weight of each new estimate after the first */
 
 /* ---- Pi link ---------------------------------------------------------------- */
 #define PI_UART_BAUD            9600U   /* UART4: PA0 = TX (A0), PA1 = RX (A1) */

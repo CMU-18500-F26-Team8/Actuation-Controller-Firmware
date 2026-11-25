@@ -1,7 +1,8 @@
 /**
  * @file    drive.h
  * @brief   Differential drive: one speed PID per wheel, per-wheel odometry,
- *          and encoder-measured in-place turns.
+ *          and in-place turns ended and measured by the gyro (imu.h), or by
+ *          the encoders when the gyro isn't available.
  *
  * Owns the encoders and motor duties while Pi control is running: nothing
  * else may call encoder_update() or motor_set_duty() in that mode.
@@ -62,8 +63,24 @@ bool drive_stop(void);
 bool drive_turn(float deg);
 
 /** True once per finished (or stop-aborted) turn; `deg_out` gets the angle
- *  the encoders measured, signed like the command. */
+ *  measured (gyro, or encoders without it), + = counter-clockwise. */
 bool drive_take_turn_done(float *deg_out);
+
+/** Details of the last finished turn, for the debug log. */
+typedef struct {
+  float    target_deg;     /* commanded */
+  float    reported_deg;   /* what drive_take_turn_done gave */
+  float    gyro_deg;       /* gyro's angle (meaningful if used_gyro) */
+  float    enc_deg;        /* encoders' angle */
+  bool     used_gyro;      /* the gyro ended and measured it */
+  bool     fell_back;      /* started on the gyro, finished on the encoders */
+  bool     slipped;        /* ended by the slip guard (TURN_SLIP_*) */
+  bool     wrong_way;      /* gyro turned against the wheels (IMU_YAW_SIGN?) */
+  bool     aborted;        /* ended by drive_stop() */
+  uint32_t duration_ms;
+} drive_turn_info_t;
+
+void drive_last_turn(drive_turn_info_t *out);
 
 drive_state_t drive_state(void);
 const char   *drive_state_name(drive_state_t s);
