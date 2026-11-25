@@ -130,7 +130,7 @@ static bool parse_bool(const char *s, bool *out)
  *     state 0 stopped 1 straight 2 reverse 3 turning; sp/v in mm/s; duty permille
  * Changes last until reset: copy the final values into robot_config.h. */
 
-#define TUNING_NAMES "kp_l ki_l kd_l kp_r ki_r kd_r speed turn accel"
+#define TUNING_NAMES "kp_l ki_l kd_l kp_r ki_r kd_r speed turn accel hold"
 
 static void print_tuning(void)
 {
@@ -290,7 +290,13 @@ static void handle_imu(const pi_msg_t *m)
 static bool handle_tuning(const pi_msg_t *m)
 {
   const char *type = m->field[0];
-  if (!strcasecmp(type, "get")) { print_tuning(); return true; }
+  if (!strcasecmp(type, "get"))
+  {
+    char h[12];
+    print_tuning();                        /* (the G line stays 9 fields for pid_tune.py) */
+    uart_log("hold %s (heading hold KP, 1/s; 0 = off)\n", fmt_fixed(h, sizeof(h), g_drive_tuning.hold_kp, 2, false));
+    return true;
+  }
   if (!strcasecmp(type, "telem"))
   {
     bool on;
@@ -315,6 +321,7 @@ static bool handle_tuning(const pi_msg_t *m)
       { "speed", &g_drive_tuning.target_mps, 0.0f, 0.6f },
       { "turn",  &g_drive_tuning.turn_mps,   TURN_MIN_SPEED_MPS, 0.6f },
       { "accel", &g_drive_tuning.accel_mps2, 0.01f, 100.0f },
+      { "hold",  &g_drive_tuning.hold_kp,    0.0f, 20.0f },
     };
     char *end = NULL;
     float v = strtof(m->field[2], &end);
@@ -331,6 +338,11 @@ static bool handle_tuning(const pi_msg_t *m)
       }
       *k_vars[i].v = v;
       print_tuning();
+      if (k_vars[i].v == &g_drive_tuning.hold_kp)
+      {
+        char h[12];
+        uart_log("hold %s (heading hold KP, 1/s; 0 = off)\n", fmt_fixed(h, sizeof(h), v, 2, false));
+      }
       return true;
     }
     uart_log("      ignored: unknown name \"%s\" (" TUNING_NAMES ")\n", m->field[1]);
@@ -472,6 +484,12 @@ static void status_line(uint32_t now)
   }
   uart_log(" | odom %s m", fmt_fixed(o, sizeof(o), drive_odometer_m(), 3, false));
   if (imu_ok()) uart_log(" | yaw %s", fmt_fixed(o, sizeof(o), (float)imu_yaw_deg(), 1, true));
+  float herr, hdv;
+  if (drive_hold_info(&herr, &hdv))
+  {
+    char e[12], v[12];
+    uart_log(" | hold err %s dv %s", fmt_fixed(e, sizeof(e), herr, 2, true), fmt_fixed(v, sizeof(v), hdv, 3, true));
+  }
   uart_log("\n");
 }
 

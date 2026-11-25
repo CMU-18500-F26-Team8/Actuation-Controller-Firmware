@@ -10,6 +10,8 @@
  *      A turn ends when the gyro has turned the angle (imu.h), or, without a
  *      trustworthy gyro, when the wheels have travelled its arc. A gyro turn
  *      brakes, waits TURN_SETTLE_MS and reports the gyro's angle.
+ *      Straight / reverse hold the gyro heading from the move's start: the
+ *      right wheel gets +dv, the left -dv (HEADING_HOLD_*).
  *   3. ramp each setpoint by at most ACCEL_MPS2
  *   4. one PID per wheel (its own gains) -> motor duty
  */
@@ -60,6 +62,10 @@ static double        s_turn_yaw0;          /* gyro yaw when the turn started */
 static bool          s_turn_done;
 static float         s_turn_done_deg;
 static drive_turn_info_t s_last_turn;
+static bool          s_hold;               /* heading hold active for this straight / reverse */
+static double        s_hold_ref;           /* gyro yaw to hold */
+static float         s_hold_err;           /* last heading error, deg */
+static float         s_hold_dv;            /* last correction, m/s */
 static uint32_t      s_odom_halfcounts;    /* sum of |dL + dR| */
 static uint32_t      s_last_tick;
 static uint32_t      s_tick_count;
@@ -67,7 +73,7 @@ static uint32_t      s_tick_count;
 drive_tuning_t g_drive_tuning = {
   .kp = { PID_L_KP, PID_R_KP }, .ki = { PID_L_KI, PID_R_KI }, .kd = { PID_L_KD, PID_R_KD },
   .target_mps = TARGET_SPEED_MPS, .turn_mps = TURN_SPEED_MPS,
-  .accel_mps2 = ACCEL_MPS2,
+  .accel_mps2 = ACCEL_MPS2, .hold_kp = HEADING_HOLD_KP,
 };
 #define T g_drive_tuning
 
@@ -115,6 +121,10 @@ static void begin_command(drive_state_t st, float dir_l, float dir_r)
     s_w[i].pos0 = s_w[i].pos;
     pid_reset(&s_w[i]);                    /* setpoint stays continuous */
   }
+  s_hold = HEADING_HOLD && (st == DRIVE_STRAIGHT || st == DRIVE_REVERSE) && imu_ok();
+  s_hold_ref = imu_yaw_deg();
+  s_hold_err = 0.0f;
+  s_hold_dv = 0.0f;
 }
 
 /** Angle (deg, + = CCW) the gyro has turned since the turn started. */
@@ -302,11 +312,26 @@ void drive_poll(uint32_t now)
     mag = T.target_mps;
   }
 
+  /* Heading hold: steer back to the start heading (turn rate = KP x error). */
+  float dv = 0.0f;
+  if (s_state != DRIVE_TURNING && s_hold)
+  {
+    if (!imu_ok()) s_hold = false;         /* gyro lost: plain wheel PIDs from here */
+    else
+    {
+      s_hold_err = (float)(imu_yaw_deg() - s_hold_ref);
+      dv = clampf(-T.hold_kp * s_hold_err * DEG_TO_RAD * HALF_TRACK_M,
+                  -HEADING_HOLD_MAX_MPS, HEADING_HOLD_MAX_MPS);
+    }
+    s_hold_dv = dv;
+  }
+
   /* ---- 3 + 4. ramp, PID, output ------------------------------------------------ */
   for (uint8_t i = 0; i < 2; i++)
   {
     wheel_t *w = &s_w[i];
-    w->sp = ramp_toward(w->sp, s_dir[i] * mag, T.accel_mps2 * dt);
+    float corr = (i == 0) ? -dv : dv;      /* + dv turns left: right wheel faster */
+    w->sp = ramp_toward(w->sp, s_dir[i] * mag + corr, T.accel_mps2 * dt);
     w->duty = pid_step(w, i, dt);
     motor_set_duty(w->motor, w->duty);
   }
@@ -368,6 +393,14 @@ bool drive_take_turn_done(float *deg_out)
 }
 
 void drive_last_turn(drive_turn_info_t *out) { *out = s_last_turn; }
+
+bool drive_hold_info(float *err_deg, float *dv_mps)
+{
+  if (!s_hold || (s_state != DRIVE_STRAIGHT && s_state != DRIVE_REVERSE)) return false;
+  *err_deg = s_hold_err;
+  *dv_mps = s_hold_dv;
+  return true;
+}
 
 drive_state_t drive_state(void) { return s_state; }
 

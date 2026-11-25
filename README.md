@@ -12,6 +12,7 @@ driver and takes its orders from the Raspberry Pi over UART.
   - The robot replies with `odometer`, `turn-complete` and `button-press`.
 - **Speed control:** one PID per wheel at 50 Hz, with a setpoint ramp and anti-windup.
 - **Turns** in place, ended and measured by the MPU-6050 gyro (encoders if no IMU), slowing near the end.
+- **Straights** hold the gyro heading from the start of the move (heading hold), so the robot doesn't curve.
 - **Safety:** stops if the Pi sends no motor instruction for 500 ms while driving.
 - **Debug and tuning** over the ST-LINK USB port (115200): a status log, and the
   live `get` / `set` / `telem` commands used by `tools/pid_tune.py`.

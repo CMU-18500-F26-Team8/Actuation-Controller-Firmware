@@ -69,6 +69,17 @@
                                          * as much) is ignored and the encoders finish:
                                          * IMU_YAW_SIGN is wrong */
 
+/* ---- Heading hold (straight / reverse, needs the gyro) ---------------------
+ * While driving straight or backing up, the gyro heading from the start of
+ * the move is held: each control tick the right wheel's setpoint gets +dv and
+ * the left's -dv, dv = KP x heading error, as a turn rate (deg/s per deg),
+ * converted to wheel speed and capped at MAX. Without a trustworthy gyro the
+ * wheels just run their own speed PIDs, as before. "set,hold,<v>" on the USB
+ * port changes KP live. */
+#define HEADING_HOLD            1       /* 0 = off */
+#define HEADING_HOLD_KP         2.0f    /* 1/s: 1 deg off asks for 2 deg/s back (~0.5 s) */
+#define HEADING_HOLD_MAX_MPS    0.04f   /* largest wheel-speed correction, each side */
+
 /* ---- IMU: HW-123 / GY-521 (MPU-6050), Z gyro only ---------------------------
  * I2C1: D15 (PB8) = SCL, D14 (PB9) = SDA; VCC 3V3 or 5V, AD0 open. See imu.h.
  * Calibrate the scale on the USB debug port: "imu,zero", turn the robot by

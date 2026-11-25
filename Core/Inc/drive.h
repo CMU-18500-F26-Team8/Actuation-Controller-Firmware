@@ -1,8 +1,8 @@
 /**
  * @file    drive.h
  * @brief   Differential drive: one speed PID per wheel, per-wheel odometry,
- *          and in-place turns ended and measured by the gyro (imu.h), or by
- *          the encoders when the gyro isn't available.
+ *          a gyro heading hold on straights, and in-place turns ended and
+ *          measured by the gyro (imu.h), or by the encoders without it.
  *
  * Owns the encoders and motor duties while Pi control is running: nothing
  * else may call encoder_update() or motor_set_duty() in that mode.
@@ -35,6 +35,7 @@ typedef struct {
   float target_mps;        /* straight / reverse (TARGET_SPEED_MPS) */
   float turn_mps;          /* turning (TURN_SPEED_MPS) */
   float accel_mps2;        /* setpoint ramp (ACCEL_MPS2) */
+  float hold_kp;           /* heading hold gain (HEADING_HOLD_KP), 0 = off */
 } drive_tuning_t;
 
 extern drive_tuning_t g_drive_tuning;
@@ -81,6 +82,11 @@ typedef struct {
 } drive_turn_info_t;
 
 void drive_last_turn(drive_turn_info_t *out);
+
+/** While driving straight / backing up with the heading hold on: true, with
+ *  the heading error (deg, + = robot left of its start heading) and the
+ *  wheel-speed correction (m/s, + = right wheel faster). */
+bool drive_hold_info(float *err_deg, float *dv_mps);
 
 drive_state_t drive_state(void);
 const char   *drive_state_name(drive_state_t s);
