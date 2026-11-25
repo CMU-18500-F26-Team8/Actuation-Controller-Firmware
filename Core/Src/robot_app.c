@@ -19,6 +19,8 @@
  * IMU calibration (either port; the Pi only gets these after asking):
  *   imu[,zero|cal|scale,<v>|watch,on|off|turns,on|off]
  *   -> imu-status,<ok|no-bias|absent>,<yaw deg>,<bias deg/s>,<scale>   (Pi; USB gets a [imu] line)
+ *   imu,save | imu,forget   keep the live gyro scale in flash / go back to IMU_GYRO_SCALE
+ *   -> imu-saved,<ok|moving|failed>,<scale used from now on>,<flash|config>,
  *   -> turn-detail,<target>,<gyro>,<encoders>,<source>   after each turn, once the Pi sent imu,turns,on
  *
  * While a turn runs, every motor instruction except "stop" is ignored.
@@ -31,6 +33,7 @@
 #include "encoder.h"
 #include "drive.h"
 #include "imu.h"
+#include "settings.h"
 #include "pi_link.h"
 #include "uart_log.h"
 #include "main.h"
@@ -65,6 +68,7 @@ static uint32_t s_still_since;          /* when the robot was last seen moving *
 static bool     s_imu_watch[2];         /* "imu,watch,on" per port (pi_src_t): yaw every IMU_WATCH_MS */
 static uint32_t s_imu_watch_last;
 static bool     s_turn_detail_pi;       /* Pi sent "imu,turns,on": turn-detail after each turn */
+static const char *s_scale_source = "config";   /* where g_imu_gyro_scale came from */
 #define IMU_WATCH_MS 250U
 
 static bool     s_btn_prev_raw;
@@ -146,6 +150,8 @@ static void print_tuning(void)
  *   imu,scale,<v>           live gyro scale (copy into IMU_GYRO_SCALE)
  *   imu,watch,on|off        status every 250 ms
  *   imu,turns,on|off        (Pi only) turn-detail after each turn; USB always gets [turn]
+ *   imu,save                keep the live scale in flash (survives power loss)
+ *   imu,forget              drop the saved scale: back to IMU_GYRO_SCALE
  * Replies go to the port that asked: a [imu] log line on USB, an imu-status
  * message to the Pi. The Pi never gets either unless it sends imu commands. */
 
@@ -161,14 +167,14 @@ static void print_imu(void)
   imu_status_t st;
   imu_get_status(&st);
   char r[16], y[16], b[16], k[16];
-  uart_log("[imu] %s%s WHO_AM_I 0x%02X  rate %s deg/s  yaw %s deg  bias %s deg/s  scale %s  "
+  uart_log("[imu] %s%s WHO_AM_I 0x%02X  rate %s deg/s  yaw %s deg  bias %s deg/s  scale %s (%s)  "
            "samples %lu errors %lu bias-updates %lu\n",
            st.present ? "present" : "ABSENT", st.calibrated ? "" : " (bias not learnt yet)",
            (unsigned)st.who_am_i,
            fmt_fixed(r, sizeof(r), st.rate_dps, 2, true),
            fmt_fixed(y, sizeof(y), (float)st.yaw_deg, 2, true),
            fmt_fixed(b, sizeof(b), st.bias_dps, 3, true),
-           fmt_fixed(k, sizeof(k), g_imu_gyro_scale, 4, false),
+           fmt_fixed(k, sizeof(k), g_imu_gyro_scale, 4, false), s_scale_source,
            (unsigned long)st.samples, (unsigned long)st.errors, (unsigned long)st.bias_updates);
 }
 
@@ -244,11 +250,39 @@ static void handle_imu(const pi_msg_t *m)
     if (m->field[2][0] == '\0' || !end || *end != '\0' || !isfinite(v) || v < 0.5f || v > 1.5f)
       uart_log("      ignored: imu,scale needs a number from 0.5 to 1.5\n");
     else
+    {
       g_imu_gyro_scale = v;
+      s_scale_source = "live, not saved";
+    }
     reply_imu(src);
     return;
   }
-  uart_log("      ignored: imu | imu,zero | imu,cal | imu,scale,<v> | imu,watch,on|off | imu,turns,on|off\n");
+  if (!strcasecmp(sub, "save") || !strcasecmp(sub, "forget"))
+  {
+    bool forget = !strcasecmp(sub, "forget");
+    const char *result;
+    if (drive_state() != DRIVE_STOPPED)
+      result = "moving";                   /* a full-sector erase stalls the CPU 1-2 s */
+    else if (!settings_save_gyro_scale(forget ? 0.0f : g_imu_gyro_scale))
+      result = "failed";
+    else
+    {
+      result = "ok";
+      if (forget) g_imu_gyro_scale = IMU_GYRO_SCALE;
+      s_scale_source = forget ? "config" : "flash";
+    }
+    char k[16];
+    fmt_fixed(k, sizeof(k), g_imu_gyro_scale, 4, false);
+    uart_log("[imu] %s: %s (scale %s, %s)\n", forget ? "forget" : "save",
+             !strcmp(result, "ok") ? "done" : !strcmp(result, "moving") ? "refused, the robot is moving"
+                                                                       : "FLASH WRITE FAILED",
+             k, s_scale_source);
+    if (src == PI_SRC_PI)
+      send4("imu-saved", result, k, !strcmp(s_scale_source, "flash") ? "flash" : "config", NULL);
+    return;
+  }
+  uart_log("      ignored: imu | imu,zero | imu,cal | imu,scale,<v> | imu,save | imu,forget | "
+           "imu,watch,on|off | imu,turns,on|off\n");
   reply_imu(src);
 }
 
@@ -480,7 +514,8 @@ void robot_app_init(void)
            (unsigned)PI_UART_BAUD);
   uart_log("Commands can also be typed here (end with Enter). B1 = front button, LD2 = LEDs.\n");
   uart_log("Tuning (here only): get | set,<name>,<value> | telem,on|off   names: " TUNING_NAMES "\n");
-  uart_log("IMU (here or from the Pi): imu | imu,zero | imu,cal | imu,scale,<v> | imu,watch,on|off | imu,turns,on|off\n");
+  uart_log("IMU (here or from the Pi): imu | imu,zero | imu,cal | imu,scale,<v> | imu,save | imu,forget | "
+           "imu,watch,on|off | imu,turns,on|off\n");
   {
     char s1[12], s2[12], s3[12], s4[12];
     uart_log("Target %s m/s, turns %s m/s, wheel %s m, track %s m\n",
@@ -490,6 +525,23 @@ void robot_app_init(void)
              fmt_fixed(s4, sizeof(s4), TRACK_WIDTH_M, 4, false));
   }
   boot_selftest();
+  settings_init();
+  {
+    float v, under;
+    char a[16], b[16];
+    if (settings_gyro_scale(&v))
+    {
+      g_imu_gyro_scale = v;
+      s_scale_source = "flash";
+      uart_log("[imu] gyro scale %s, saved in flash\n", fmt_fixed(a, sizeof(a), v, 4, false));
+    }
+    else if (settings_gyro_scale_ignored(&v, &under))
+    {
+      fmt_fixed(a, sizeof(a), v, 4, false);
+      fmt_fixed(b, sizeof(b), under, 4, false);
+      uart_log("[imu] saved gyro scale %s ignored: saved when IMU_GYRO_SCALE was %s, robot_config.h changed it\n", a, b);
+    }
+  }
   imu_init();
   drive_init();
 

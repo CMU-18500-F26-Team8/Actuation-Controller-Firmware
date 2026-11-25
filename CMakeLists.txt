@@ -53,6 +53,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_SOURCE_DIR}/Core/Src/drive.c
     ${CMAKE_SOURCE_DIR}/Core/Src/robot_app.c
     ${CMAKE_SOURCE_DIR}/Core/Src/imu.c
+    ${CMAKE_SOURCE_DIR}/Core/Src/settings.c
 )
 
 # Add include paths

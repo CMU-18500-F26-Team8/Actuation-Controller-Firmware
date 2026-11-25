@@ -56,7 +56,9 @@ ENTRY(Reset_Handler)
 MEMORY
 {
 RAM (xrw)      : ORIGIN = 0x20000000, LENGTH = 128K
-FLASH (rx)      : ORIGIN = 0x8000000, LENGTH = 512K
+/* 384K, not 512K: the last sector (7, 0x08060000, 128K) holds settings that
+   survive power loss (Core/Src/settings.c). Keep it if CubeMX regenerates this. */
+FLASH (rx)      : ORIGIN = 0x8000000, LENGTH = 384K
 }
 
 /* Highest address of the user mode stack */

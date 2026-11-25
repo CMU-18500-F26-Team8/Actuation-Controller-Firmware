@@ -135,9 +135,11 @@ Mount it flat, chip side up, on something rigid (foam tape against motor vibrati
 4. **Scale:** line the robot up against a mark, type `imu,zero`, turn it slowly by hand 5 whole turns counter-clockwise back onto the mark, then type `imu`. Compute scale = 1800 / yaw. You can try it live with `imu,scale,<v>`, then copy it into `IMU_GYRO_SCALE`. Expect a value within a few percent of 1.000.
 5. **Drive test:** send `motor-instruction,turn,90,,` and read the `[turn]` line. It shows the target, the gyro's angle, the encoders' angle and which one was reported. The difference between gyro and encoders is the slip the encoders used to miss.
 
-IMU commands: `imu` (status), `imu,zero`, `imu,cal` (forget the bias and learn it again), `imu,scale,<v>`, `imu,watch,on|off`, and from the Pi also `imu,turns,on|off`. They work on the USB port and from the Pi. A command from the Pi is answered on the Pi link with `imu-status,<ok|no-bias|absent>,<yaw>,<bias>,<scale>`, and after `imu,turns,on` the Pi also gets `turn-detail,<target>,<gyro>,<encoders>,<source>` after each turn (spec section 4.4). Neither is sent unless the Pi asks, so navigation never sees them.
+IMU commands: `imu` (status), `imu,zero`, `imu,cal` (forget the bias and learn it again), `imu,scale,<v>`, `imu,save`, `imu,forget`, `imu,watch,on|off`, and from the Pi also `imu,turns,on|off`. They work on the USB port and from the Pi. A command from the Pi is answered on the Pi link with `imu-status,<ok|no-bias|absent>,<yaw>,<bias>,<scale>`, and after `imu,turns,on` the Pi also gets `turn-detail,<target>,<gyro>,<encoders>,<source>` after each turn (spec section 4.4). Neither is sent unless the Pi asks, so navigation never sees them.
 
-**Calibrating without a cable:** SSH into the Pi and run `python3 NCC_System/tools/motor_controller/motor_demo.py` (with navigation stopped). Type `imucal start`, turn the robot by hand 5 whole turns to the left back onto a mark, then type `imucal done 5`. It sets the scale live and prints the `#define IMU_GYRO_SCALE` line to keep it. `imu turns on` and then `l 90` shows each turn's gyro and encoder angles. `IMU_TURNS 0` keeps the IMU running (status, watch) but turns go back to the encoders. `IMU_ENABLED 0` removes all IMU code.
+**Saved scale:** `imu,save` writes the live scale to flash sector 7 (0x08060000, reserved by the linker script, which stops the firmware at 384 KB), and the firmware loads it at every boot, including after power loss and after reflashing (only a full chip erase clears it). `imu,forget` goes back to `IMU_GYRO_SCALE`. Pasting a different `IMU_GYRO_SCALE` into `robot_config.h` also overrides a saved scale, and the boot log says so. A save is refused while the robot moves: each save appends a 16-byte record, and once every 8192 saves the sector is erased, which stalls the CPU for 1–2 s. The boot log shows `[imu] gyro scale ..., saved in flash`, and `imu` shows where the scale came from (`config`, `flash`, or `live, not saved`).
+
+**Calibrating without a cable:** SSH into the Pi and run `python3 NCC_System/tools/motor_controller/motor_demo.py` (with navigation stopped). Type `imucal start`, turn the robot by hand 5 whole turns to the left back onto a mark, then type `imucal done 5`. It sets the scale and saves it in flash. `imu turns on` and then `l 90` shows each turn's gyro and encoder angles. `IMU_TURNS 0` keeps the IMU running (status, watch) but turns go back to the encoders. `IMU_ENABLED 0` removes all IMU code.
 
 ## LED / button
 
@@ -185,6 +187,7 @@ Reading the result: self-test 2/2 fails → wiring/VIN, motors not involved. Sel
 | `Core/Src/pi_link.c` | UART4 link to the Pi (+ typed commands on USB), ring buffers |
 | `Core/Src/drive.c` | One speed PID per wheel (own gains), odometry, in-place turns (gyro-ended, encoder fallback) |
 | `Core/Src/imu.c` | MPU-6050 Z gyro on I2C1 (register-level): yaw, bias learnt at rest, re-probe on failure |
+| `Core/Src/settings.c` | Settings kept in flash sector 7 across power loss (the gyro scale) |
 | `Core/Src/robot_app.c` | Pi messages → drive, odometer/turn/button reports, LD2 |
 | `Core/Src/main.c` | `robot_app_init` / `robot_app_poll` in `USER CODE` blocks |
 
