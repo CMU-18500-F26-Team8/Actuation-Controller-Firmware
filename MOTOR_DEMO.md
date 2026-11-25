@@ -115,6 +115,8 @@ A HiLetgo HW-123 (GY-521 board, MPU-6050) gives the yaw rate. In Pi mode, a turn
 | SDA | **D14** (PB9, I2C1 SDA) |
 | AD0, INT, XDA, XCL | leave open (address 0x68) |
 
+**3V3 sits right next to RESET**: CN6 pin 3 (RESET) / pin 4 (3V3), and CN7 pin 14 (RESET) / pin 16 (3V3). VCC one pin off, on RESET, loads NRST down: the board stops running and the debugger fails with `DEV_TARGET_HELD_UNDER_RESET` ("could not connect"). The HW-123's power LED lights only when VCC is really on 3V3.
+
 Mount it flat, chip side up, on something rigid (foam tape against motor vibration), as close to the midpoint between the wheels as is easy. Position doesn't change the yaw rate, but flat does.
 
 **Fallbacks.** Without a working IMU, turns run on the encoders exactly as before:
