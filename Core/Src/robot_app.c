@@ -16,6 +16,11 @@
  *                                        every ODOM_IDLE_PERIOD_MS otherwise)
  *   button-press,,,,                     (B1, once per BUTTON_HOLDOFF_MS)
  *
+ * IMU calibration (either port; the Pi only gets these after asking):
+ *   imu[,zero|cal|scale,<v>|watch,on|off|turns,on|off]
+ *   -> imu-status,<ok|no-bias|absent>,<yaw deg>,<bias deg/s>,<scale>   (Pi; USB gets a [imu] line)
+ *   -> turn-detail,<target>,<gyro>,<encoders>,<source>   after each turn, once the Pi sent imu,turns,on
+ *
  * While a turn runs, every motor instruction except "stop" is ignored.
  * "stop" aborts the turn and turn-complete reports the angle reached.
  */
@@ -57,8 +62,9 @@ static bool     s_telem;                /* USB "telem,on": one T line per contro
 static uint32_t s_telem_tick;
 
 static uint32_t s_still_since;          /* when the robot was last seen moving */
-static bool     s_imu_watch;            /* USB "imu,watch,on": yaw every IMU_WATCH_MS */
+static bool     s_imu_watch[2];         /* "imu,watch,on" per port (pi_src_t): yaw every IMU_WATCH_MS */
 static uint32_t s_imu_watch_last;
+static bool     s_turn_detail_pi;       /* Pi sent "imu,turns,on": turn-detail after each turn */
 #define IMU_WATCH_MS 250U
 
 static bool     s_btn_prev_raw;
@@ -86,14 +92,20 @@ static void log_time(uint32_t now)
 
 /* ---- sending ------------------------------------------------------------------ */
 
-static void send(const char *type, const char *b1)
+static void send4(const char *type, const char *b1, const char *b2, const char *b3, const char *b4)
 {
-  bool ok = pi_link_send(type, b1, NULL, NULL, NULL);
+  bool ok = pi_link_send(type, b1, b2, b3, b4);
   if (DEBUG_ECHO_PI || !ok)
   {
     log_time(HAL_GetTick());
-    uart_log("[tx%s] %s,%s,,,\n", ok ? "" : " DROPPED, buffer full", type, b1 ? b1 : "");
+    uart_log("[tx%s] %s,%s,%s,%s,%s\n", ok ? "" : " DROPPED, buffer full", type,
+             b1 ? b1 : "", b2 ? b2 : "", b3 ? b3 : "", b4 ? b4 : "");
   }
+}
+
+static void send(const char *type, const char *b1)
+{
+  send4(type, b1, NULL, NULL, NULL);
 }
 
 /* ---- receiving ----------------------------------------------------------------- */
@@ -127,12 +139,22 @@ static void print_tuning(void)
   uart_log("G,%s,%s,%s,%s,%s,%s,%s,%s,%s\n", v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8]);
 }
 
-/* ---- IMU (USB debug port only) ------------------------------------------------
+/* ---- IMU calibration (USB debug port, or the Pi) ----------------------------------
  *   imu                     status: present, bias, rate, yaw, scale, counts
  *   imu,zero                yaw = 0 (then turn the robot by hand, read "imu")
  *   imu,cal                 forget the bias; relearnt at the next still moment
  *   imu,scale,<v>           live gyro scale (copy into IMU_GYRO_SCALE)
- *   imu,watch,on|off        yaw and rate every 250 ms */
+ *   imu,watch,on|off        status every 250 ms
+ *   imu,turns,on|off        (Pi only) turn-detail after each turn; USB always gets [turn]
+ * Replies go to the port that asked: a [imu] log line on USB, an imu-status
+ * message to the Pi. The Pi never gets either unless it sends imu commands. */
+
+static const char *imu_state_word(const imu_status_t *st)
+{
+  if (!st->present)    return "absent";
+  if (!st->calibrated) return "no-bias";
+  return "ok";
+}
 
 static void print_imu(void)
 {
@@ -150,25 +172,69 @@ static void print_imu(void)
            (unsigned long)st.samples, (unsigned long)st.errors, (unsigned long)st.bias_updates);
 }
 
+/** imu-status,<ok|no-bias|absent>,<yaw>,<bias>,<scale> to the Pi. */
+static void send_imu_status(void)
+{
+  imu_status_t st;
+  imu_get_status(&st);
+  char y[16], b[16], k[16];
+  send4("imu-status", imu_state_word(&st),
+        fmt_fixed(y, sizeof(y), (float)st.yaw_deg, 2, true),
+        fmt_fixed(b, sizeof(b), st.bias_dps, 3, true),
+        fmt_fixed(k, sizeof(k), g_imu_gyro_scale, 4, false));
+}
+
+static void reply_imu(pi_src_t src)
+{
+  if (src == PI_SRC_PI) send_imu_status();
+  else                  print_imu();
+}
+
+/** "on" / "off" / true / false / 1 / 0. */
+static bool parse_on_off(const char *s, bool *out)
+{
+  if (!strcasecmp(s, "on"))  { *out = true;  return true; }
+  if (!strcasecmp(s, "off")) { *out = false; return true; }
+  return parse_bool(s, out);
+}
+
 static void handle_imu(const pi_msg_t *m)
 {
   const char *sub = m->field[1];
-  if (sub[0] == '\0') { print_imu(); return; }
-  if (!strcasecmp(sub, "zero")) { imu_zero(); uart_log("[imu] yaw zeroed\n"); return; }
+  pi_src_t src = m->src;
+  bool on;
+
+  if (sub[0] == '\0') { reply_imu(src); return; }
+  if (!strcasecmp(sub, "zero")) { imu_zero(); reply_imu(src); return; }
   if (!strcasecmp(sub, "cal"))
   {
     imu_recalibrate();
     uart_log("[imu] bias forgotten; relearnt after %u ms standing still\n", (unsigned)IMU_STILL_AFTER_MS);
+    reply_imu(src);
     return;
   }
   if (!strcasecmp(sub, "watch"))
   {
-    bool on;
-    if (!strcasecmp(m->field[2], "on")) on = true;
-    else if (!strcasecmp(m->field[2], "off")) on = false;
-    else if (!parse_bool(m->field[2], &on)) { uart_log("      ignored: imu,watch,on or imu,watch,off\n"); return; }
-    s_imu_watch = on;
-    uart_log("[imu] watch %s\n", on ? "on" : "off");
+    if (parse_on_off(m->field[2], &on))
+    {
+      s_imu_watch[src] = on;
+      uart_log("[imu] watch %s (%s)\n", on ? "on" : "off", (src == PI_SRC_PI) ? "to the Pi" : "here");
+    }
+    else uart_log("      ignored: imu,watch,on or imu,watch,off\n");
+    reply_imu(src);
+    return;
+  }
+  if (!strcasecmp(sub, "turns"))
+  {
+    if (src != PI_SRC_PI)
+      uart_log("      [turn] lines always print here; imu,turns is for the Pi\n");
+    else if (parse_on_off(m->field[2], &on))
+    {
+      s_turn_detail_pi = on;
+      uart_log("[imu] turn-detail to the Pi %s\n", on ? "on" : "off");
+    }
+    else uart_log("      ignored: imu,turns,on or imu,turns,off\n");
+    reply_imu(src);
     return;
   }
   if (!strcasecmp(sub, "scale"))
@@ -176,15 +242,14 @@ static void handle_imu(const pi_msg_t *m)
     char *end = NULL;
     float v = strtof(m->field[2], &end);
     if (m->field[2][0] == '\0' || !end || *end != '\0' || !isfinite(v) || v < 0.5f || v > 1.5f)
-    {
       uart_log("      ignored: imu,scale needs a number from 0.5 to 1.5\n");
-      return;
-    }
-    g_imu_gyro_scale = v;
-    print_imu();
+    else
+      g_imu_gyro_scale = v;
+    reply_imu(src);
     return;
   }
-  uart_log("      ignored: imu | imu,zero | imu,cal | imu,scale,<v> | imu,watch,on|off\n");
+  uart_log("      ignored: imu | imu,zero | imu,cal | imu,scale,<v> | imu,watch,on|off | imu,turns,on|off\n");
+  reply_imu(src);
 }
 
 /** Returns true if the message was a tuning command (handled here). */
@@ -192,7 +257,6 @@ static bool handle_tuning(const pi_msg_t *m)
 {
   const char *type = m->field[0];
   if (!strcasecmp(type, "get")) { print_tuning(); return true; }
-  if (!strcasecmp(type, "imu")) { handle_imu(m); return true; }
   if (!strcasecmp(type, "telem"))
   {
     bool on;
@@ -253,6 +317,7 @@ static void handle(const pi_msg_t *m, uint32_t now)
              m->field[0], m->field[1], m->field[2], m->field[3], m->field[4]);
   }
 
+  if (!strcasecmp(type, "imu")) { handle_imu(m); return; }   /* either port */
   if (m->src == PI_SRC_DEBUG && handle_tuning(m)) return;
 
   if (!strcasecmp(type, "motor-instruction"))
@@ -415,7 +480,7 @@ void robot_app_init(void)
            (unsigned)PI_UART_BAUD);
   uart_log("Commands can also be typed here (end with Enter). B1 = front button, LD2 = LEDs.\n");
   uart_log("Tuning (here only): get | set,<name>,<value> | telem,on|off   names: " TUNING_NAMES "\n");
-  uart_log("IMU (here only): imu | imu,zero | imu,cal | imu,scale,<v> | imu,watch,on|off\n");
+  uart_log("IMU (here or from the Pi): imu | imu,zero | imu,cal | imu,scale,<v> | imu,watch,on|off | imu,turns,on|off\n");
   {
     char s1[12], s2[12], s3[12], s4[12];
     uart_log("Target %s m/s, turns %s m/s, wheel %s m, track %s m\n",
@@ -481,6 +546,15 @@ void robot_app_poll(void)
              ti.slipped ? ", SLIP: wheels far ahead of the gyro, stopped early"
                         : (ti.aborted ? ", aborted by stop" : ""),
              (unsigned long)ti.duration_ms);
+
+    if (s_turn_detail_pi)
+    {
+      const char *srcw = ti.slipped ? "gyro-slip"
+                       : ti.wrong_way ? "encoders-wrong-way"
+                       : ti.fell_back ? "encoders-gyro-lost"
+                       : ti.used_gyro ? "gyro" : "encoders";
+      send4("turn-detail", t, ti.used_gyro ? g : "", e, srcw);
+    }
   }
 
   drive_state_t st = drive_state();
@@ -538,17 +612,21 @@ void robot_app_poll(void)
              lrintf(r.setpoint_mps * 1000.0f), lrintf(r.speed_mps * 1000.0f), (int)r.duty);
   }
 
-  if (s_imu_watch && (now - s_imu_watch_last) >= IMU_WATCH_MS)
+  if ((s_imu_watch[PI_SRC_DEBUG] || s_imu_watch[PI_SRC_PI]) && (now - s_imu_watch_last) >= IMU_WATCH_MS)
   {
-    imu_status_t is;
-    char y[16], r[16];
     s_imu_watch_last = now;
-    imu_get_status(&is);
-    log_time(now);
-    uart_log("[imu] yaw %s deg  rate %s deg/s%s\n",
-             fmt_fixed(y, sizeof(y), (float)is.yaw_deg, 2, true),
-             fmt_fixed(r, sizeof(r), is.rate_dps, 2, true),
-             imu_ok() ? "" : (is.present ? "  (bias not learnt yet)" : "  (IMU absent)"));
+    if (s_imu_watch[PI_SRC_DEBUG])
+    {
+      imu_status_t is;
+      char y[16], r[16];
+      imu_get_status(&is);
+      log_time(now);
+      uart_log("[imu] yaw %s deg  rate %s deg/s%s\n",
+               fmt_fixed(y, sizeof(y), (float)is.yaw_deg, 2, true),
+               fmt_fixed(r, sizeof(r), is.rate_dps, 2, true),
+               imu_ok() ? "" : (is.present ? "  (bias not learnt yet)" : "  (IMU absent)"));
+    }
+    if (s_imu_watch[PI_SRC_PI]) send_imu_status();
   }
 
   if (!s_telem && DEBUG_STATUS_MS > 0U && st != DRIVE_STOPPED && (now - s_last_status) >= DEBUG_STATUS_MS)

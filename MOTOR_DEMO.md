@@ -135,7 +135,9 @@ Mount it flat, chip side up, on something rigid (foam tape against motor vibrati
 4. **Scale:** line the robot up against a mark, type `imu,zero`, turn it slowly by hand 5 whole turns counter-clockwise back onto the mark, then type `imu`. Compute scale = 1800 / yaw. You can try it live with `imu,scale,<v>`, then copy it into `IMU_GYRO_SCALE`. Expect a value within a few percent of 1.000.
 5. **Drive test:** send `motor-instruction,turn,90,,` and read the `[turn]` line. It shows the target, the gyro's angle, the encoders' angle and which one was reported. The difference between gyro and encoders is the slip the encoders used to miss.
 
-USB-only IMU commands: `imu` (status), `imu,zero`, `imu,cal` (forget the bias and learn it again), `imu,scale,<v>`, `imu,watch,on|off`. `IMU_TURNS 0` keeps the IMU running (status, watch) but turns go back to the encoders. `IMU_ENABLED 0` removes all IMU code.
+IMU commands: `imu` (status), `imu,zero`, `imu,cal` (forget the bias and learn it again), `imu,scale,<v>`, `imu,watch,on|off`, and from the Pi also `imu,turns,on|off`. They work on the USB port and from the Pi. A command from the Pi is answered on the Pi link with `imu-status,<ok|no-bias|absent>,<yaw>,<bias>,<scale>`, and after `imu,turns,on` the Pi also gets `turn-detail,<target>,<gyro>,<encoders>,<source>` after each turn (spec section 4.4). Neither is sent unless the Pi asks, so navigation never sees them.
+
+**Calibrating without a cable:** SSH into the Pi and run `python3 NCC_System/tools/motor_controller/motor_demo.py` (with navigation stopped). Type `imucal start`, turn the robot by hand 5 whole turns to the left back onto a mark, then type `imucal done 5`. It sets the scale live and prints the `#define IMU_GYRO_SCALE` line to keep it. `imu turns on` and then `l 90` shows each turn's gyro and encoder angles. `IMU_TURNS 0` keeps the IMU running (status, watch) but turns go back to the encoders. `IMU_ENABLED 0` removes all IMU code.
 
 ## LED / button
 
